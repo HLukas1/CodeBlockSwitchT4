@@ -87,3 +87,5 @@ Das Schreiben einer Codierung verändert MSG-Daten. Verwende den Codeblock-Wechs
 
 Der Sketch enthält Funktionen zum seriellen Einlesen einer neuen Codierung und eines WSC. Im gezeigten Hauptprogramm wird jedoch kein serieller Befehlsdialog aufgerufen. Der beschriebene Bedienweg für die Codierungsänderung ist daher der Codeblock-Modus mit dem Taster.
 
+
+Readme Wurde KI Generiert
