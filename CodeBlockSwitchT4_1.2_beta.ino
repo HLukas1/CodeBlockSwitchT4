@@ -1575,9 +1575,19 @@ void calculateFuelConsumption() {
   // STAND -> 0.0 (keine Division durch 0)
   // -------------------------------------------------
 
-  if (avgSpeed < 1.0f) {
+if (currentSpeed < 4.0f) {
+
     fuelConsumption = 0.0f;
-  }
+
+    // Puffer zurücksetzen
+    for (uint8_t i = 0; i < FUEL_AVG_SAMPLES; i++) {
+        fuelHourBuf[i] = 0.0f;
+        speedBuf[i] = 0.0f;
+    }
+
+    fuelBufCount = 0;
+    fuelBufIndex = 0;
+}
 
   // -------------------------------------------------
   // GEGLAETTETER VERBRAUCH L/100km
