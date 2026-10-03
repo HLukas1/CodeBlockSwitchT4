@@ -21,7 +21,7 @@
 // 0 = normaler Fahrzeugbetrieb
 // 1 = Fahrzeugverbindung wird simuliert
 // =====================================================
-#define TESTBENCH_MODE 0 
+#define TESTBENCH_MODE 0
 
 HardwareSerial obd(1);
 
@@ -113,7 +113,7 @@ bool kwpConnected = false;
 uint16_t currentCodeblock = 0;
 
 // =====================================================
-// WLAN-HOTSPOT / WEBSERVER
+// WLAN-HOTSPOT / WEBSERVER /SSID
 // =====================================================
 
 const char* AP_SSID = "TDI-Dashboard";
@@ -1068,11 +1068,12 @@ bool connectMSG() {
   kwpConnected = true;
   Coding = 2;
   WSC = 0;
-
+ 
   Serial.println("TESTBENCH: Fahrzeugverbindung simuliert.");
-
   return true;
 #endif
+
+  // Ab hier bleibt der bisherige Code von connectMSG()
 
   if (kwpConnected) {
     return true;
@@ -2130,44 +2131,39 @@ void IRAM_ATTR handleButtonISR() {
 
 void handleButton() {
 
-  // Rohen Zustand sicher aus der ISR uebernehmen
-  noInterrupts();
-  bool rawPressed = btnRawPressed;
-  uint32_t rawChangeTime = btnRawChangeTime;
-  interrupts();
-
+  bool rawPressed = (digitalRead(BUTTON_INPUT) == LOW);
   uint32_t now = millis();
 
-  // ------------------------------------------
-  // ENTPRELLUNG
-  // Der Pegel gilt erst als stabil, wenn seit
-  // der letzten Flanke die Entprellzeit ohne
-  // weitere Aenderung vergangen ist.
-  // ------------------------------------------
+  static bool lastRaw = false;
+  static uint32_t lastChange = 0;
 
-  if ((now - rawChangeTime) < BUTTON_DEBOUNCE_MS) {
+  // Flanke erkannt -> Entprellzeit neu starten
+  if (rawPressed != lastRaw) {
+    lastRaw = rawPressed;
+    lastChange = now;
     return;
   }
 
-  // Kein Wechsel gegenueber dem letzten stabilen Zustand
+  // Pegel noch nicht lange genug stabil
+  if ((now - lastChange) < BUTTON_DEBOUNCE_MS) {
+    return;
+  }
+
+  // Kein Wechsel zum letzten stabilen Zustand
   if (rawPressed == btnStablePressed) {
     return;
   }
 
-  // ------------------------------------------
-  // ECHTER, STABILER ZUSTANDSWECHSEL
-  // ------------------------------------------
-
   btnStablePressed = rawPressed;
 
   if (btnStablePressed) {
-    // Neu gedrueckt
     btnPressStart = now;
     return;
   }
 
-  // Neu losgelassen -> Ereignis auswerten
   uint32_t pressTime = now - btnPressStart;
+
+
 
   Serial.print("TASTER LOSGELASSEN: ");
   Serial.print(pressTime);
@@ -2546,10 +2542,7 @@ digitalWrite(BUTTON_OUTPUT, LOW);
 pinMode(BUTTON_INPUT, INPUT_PULLUP);
 
 
-attachInterrupt(
-  digitalPinToInterrupt(BUTTON_INPUT),
-  handleButtonISR,
-  CHANGE);
+
 
   // ------------------------------------------
   // LED TEST
