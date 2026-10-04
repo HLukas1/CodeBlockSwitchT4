@@ -3,7 +3,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Fonts/FreeSans9pt7b.h>
-
+#include <WiFi.h>
+#include <WebServer.h>
 
 
 // =====================================================
@@ -20,7 +21,7 @@
 // 0 = normaler Fahrzeugbetrieb
 // 1 = Fahrzeugverbindung wird simuliert
 // =====================================================
-#define TESTBENCH_MODE 0 
+#define TESTBENCH_MODE 0
 
 HardwareSerial obd(1);
 
@@ -89,31 +90,47 @@ uint8_t blockCounter = 1;
 uint16_t Coding = 0;
 uint32_t WSC = 0;
 
-uint8_t lastRpmRaw = 0;
+
 uint16_t lastRpm = 0;
-uint16_t lastBoostRaw = 0;
 uint16_t lastBoostMbar = 0;
-float injectionDriver = 0.0;
-float injectionTorque = 0.0;
-float injectionSmoke = 0.0;
 float injectionActual = 0.0;
 
 float currentSpeed = 0.0;
 float fuelConsumption = 0.0;
 
+// Glaettung Verbrauch (gleitender Mittelwert)
+const uint8_t FUEL_AVG_SAMPLES = 10;
+
+float fuelHourBuf[FUEL_AVG_SAMPLES] = {0};
+float speedBuf[FUEL_AVG_SAMPLES] = {0};
+uint8_t fuelBufIndex = 0;
+uint8_t fuelBufCount = 0;
+
 bool kwpConnected = false;
 
-bool codeblockMode = false;
 
 // Aktuell im MSG vorhandene Codierung
 uint16_t currentCodeblock = 0;
 
+// =====================================================
+// WLAN-HOTSPOT / WEBSERVER /SSID
+// =====================================================
 
+const char* AP_SSID = "TDI-Dashboard";
+const char* AP_PASS = "12345678";   // mind. 8 Zeichen
 
-// Anzeige:
-// false = Drehzahl
-// true  = Ladedruck
-bool showBoost = false;
+WebServer server(80);
+
+// Zeitpunkt der letzten Webanfrage
+uint32_t lastWebRequest = 0;
+
+// So lange gilt die Webseite nach der letzten Anfrage als offen
+const uint32_t WEB_ACTIVE_TIMEOUT_MS = 3000;
+
+bool webClientActive() {
+  return lastWebRequest != 0 &&
+         (millis() - lastWebRequest) < WEB_ACTIVE_TIMEOUT_MS;
+}
 
 
 
@@ -143,7 +160,7 @@ const uint32_t MEASUREMENT_INTERVAL_MS = 500;
 
 enum DisplayMode {
   MODE_VOLTAGE,
-  MODE_IDLE,
+  MODE_BOOST,
   MODE_CONSUMPTION,
   MODE_RPM,
   MODE_INJECTION,
@@ -182,7 +199,179 @@ const unsigned char vwLogo[] PROGMEM = {
 
 
 
+// =====================================================
+// KWP1281 MESSWERT
+// =====================================================
 
+struct KwpValue {
+  bool    valid;    // Feld vorhanden und gelesen
+  bool    isText;   // true = Ergebnis ist Text (z.B. COLD/WARM)
+  uint8_t formula;  // Kennzahl (Byte 1)
+  uint8_t a;        // Byte 2
+  uint8_t b;        // Byte 3
+  double  value;    // umgerechneter Messwert
+  String  unit;     // Einheit
+  String  text;     // Textergebnis
+};
+
+const uint8_t KWP_MAX_FIELDS = 4;
+
+// =====================================================
+// WEB: FREIE MESSWERTBLOCK-ANZEIGE
+// =====================================================
+
+uint8_t  webMwbGroup   = 0;      // gewünschter Block (0 = keiner)
+uint32_t lastMwbRequest = 0;
+
+KwpValue mwbData[KWP_MAX_FIELDS];
+uint8_t  mwbCount     = 0;       // Anzahl gelesener Felder
+uint8_t  mwbDataGroup = 0;       // Block, zu dem mwbData gehört
+bool     mwbError     = false;
+
+// Wird die MWB-Seite gerade abgefragt?
+bool mwbActive() {
+  return webMwbGroup > 0 &&
+         lastMwbRequest != 0 &&
+         (millis() - lastMwbRequest) < 3000;
+}
+
+String jsonEscape(const String &s) {
+  String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if ((uint8_t)c < 0x20) { o += '?'; }
+    else o += c;   // UTF-8 (Umlaute, °) bleibt erhalten
+  }
+  return o;
+}
+
+// =====================================================
+// MWB-TABELLE: TDI-Motoren ab 05/1999 (T4-Wiki)
+// =====================================================
+
+struct MwbField {
+  const char* name;
+  const char* unit;
+  const char* soll;
+};
+
+struct MwbInfo {
+  uint8_t group;
+  const char* title;
+  const char* cond;
+  MwbField f[4];
+};
+
+const MwbInfo MWB_TABLE[] = {
+  {1, "Einspritzmenge", "Leerlauf, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "740 - 800"},
+    {"Einspritzmenge", "mg/H", "2,2 - 9"},
+    {"Spannung Geber Regelschieberweg G149", "V", "1,25 - 2,00"},
+    {"Kühlmitteltemperatur", "°C", "80 - 110"}}},
+
+  {2, "Leerlaufdrehzahl", "Leerlauf, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "740 - 800"},
+    {"Gaspedalstellung", "%", "0 - 100 (0 = nicht betätigt)"},
+    {"Betriebszustand", "-", "010 = Klima aus + Gaspedal nicht betätigt, 101 = Klima ein"},
+    {"Kühlmitteltemperatur", "°C", "80 - 110"}}},
+
+  {3, "Abgasrückführung", "Leerlauf, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "740 - 800"},
+    {"Luftmasse (Soll)", "mg/H", "-"},
+    {"Luftmasse (Ist)", "mg/H", "-"},
+    {"Tastverhältnis Ventil AGR N18", "%", "-"}}},
+
+  {4, "Einspritzbeginn", "Leerlauf bzw. Volllastfahrt, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "Leerlauf: 740 - 800 | Volllast: 2900 - 3100"},
+    {"Einspritzbeginn (Soll)", "° vor/nach OT", "Leerlauf: 3,8 vor - 0,5 nach OT | Volllast: 9 - 14 vor OT"},
+    {"Einspritzbeginn (Ist)", "° vor/nach OT", "Leerlauf: 3,8 vor - 0,5 nach OT | Volllast: ca. Sollwert"},
+    {"Tastverhältnis Ventil Spritzbeginn N108", "%", "15 - 95"}}},
+
+  {5, "Startverhältnisse", "", {
+    {"Motordrehzahl", "U/min", "-"},
+    {"Startmenge", "mg/H", "-"},
+    {"Einspritzbeginn (Ist)", "° vor/nach OT", "-"},
+    {"Kühlmitteltemperatur", "°C", "-"}}},
+
+  {6, "Schalterstellungen", "Leerlauf, Kühlmittel > 80°C", {
+    {"Geschwindigkeit", "km/h", "0"},
+    {"Bremspedalüberwachung", "xxx", "000 = Leerlauf, 011 = Bremspedal betätigt, 100 = nur Kupplungspedal betätigt"},
+    {"Geschwindigkeitsregelanlage", "xxxxxx", "siehe Artikel GRA"},
+    {"Geschwindigkeitsregelanlage", "x", "000: GRA aus, 001: GRA ein, 255: nicht freigeschaltet"}}},
+
+  {7, "Temperaturen", "Zündung aus, Motor abgekühlt", {
+    {"Kraftstofftemperatur", "°C", "Umgebungstemperatur (-5,6°C bei Defekt)"},
+    {"-", "-", "-"},
+    {"Saugrohrtemperatur", "°C", "Umgebungstemperatur (134,9°C bei Defekt)"},
+    {"Kühlmitteltemperatur", "°C", "Umgebungstemperatur"}}},
+
+  {8, "Einspritzmengenbegrenzung", "Volllastfahrt, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "2900 - 3100"},
+    {"Einspritzmenge (Fahrerwunsch)", "mg/H", "40 - 45"},
+    {"Begrenzung Drehmoment-Kennfeld", "mg/H", "30 - 36"},
+    {"Begrenzung Rauch-Kennfeld", "mg/H", "35 - 41"}}},
+
+  {9, "Einspritzmengenbegrenzung", "", {
+    {"Motordrehzahl", "U/min", "-"},
+    {"Einspritzmenge (GRA aktiv)", "mg/H", "-"},
+    {"Begrenzung Drehmoment Automatikgetriebe", "mg/H", "-"},
+    {"Spannung Geber Regelschieberweg G149", "%", "-"}}},
+
+  {10, "Luftgrößen", "Volllastfahrt, Kühlmittel > 80°C", {
+    {"Luftmasse (Ist)", "mg/H", "800 - 950"},
+    {"Atmosphärischer Druck", "mbar", "-"},
+    {"Saugrohrdruck (Ladedruck)", "mbar", "1700 - 1950"},
+    {"Gaspedalstellung", "%", "100"}}},
+
+  {11, "Ladedruckregelung", "Volllastfahrt, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "2900 - 3100"},
+    {"Ladedruck (Soll)", "mbar", "1700 - 1950"},
+    {"Ladedruck (Ist)", "mbar", "1700 - 1950"},
+    {"Tastverhältnis Ventil Ladedruckbegrenzung N75", "%", "9 - 90"}}},
+
+  {12, "Vorglühanlage", "", {
+    {"-", "-", "-"},
+    {"Vorglühzeit", "s", "-"},
+    {"Versorgungsspannung vom Steuergerät", "V", "-"},
+    {"Kühlmitteltemperatur", "°C", "-"}}},
+
+  {13, "Leerlaufruheregelung", "Leerlauf, Kühlmittel > 80°C", {
+    {"Abweichende Einspritzmenge Zyl. 1 zu Zyl. 3", "mg/H", "+/- 2,0"},
+    {"Abweichende Einspritzmenge Zyl. 2 zu Zyl. 3", "mg/H", "+/- 2,0"},
+    {"Abweichende Einspritzmenge Zyl. 4 zu Zyl. 3", "mg/H", "+/- 2,0"},
+    {"Abweichende Einspritzmenge Zyl. 5 zu Zyl. 3", "mg/H", "+/- 2,0"}}},
+
+
+
+  {18, "Schalterstellungen", "", {
+    {"Geschwindigkeit", "km/h", "-"},
+    {"Status GRA, Geschwindigkeitsmesser oder Fahrtschreiber", "xx", "-"},
+    {"-", "-", "-"},
+    {"-", "-", "-"}}},
+
+  {19, "Mengenstellwerk", "Motor aus, Zündung ein", {
+    {"Spannung G149 (Stop-Anschlag)", "V", "0,540 - 0,880"},
+    {"Spannung G149 (Start-Anschlag)", "V", "4,100 - 4,880"},
+    {"-", "-", "-"},
+    {"-", "-", "-"}}},
+
+  {125, "Datenbus", "Leerlauf", {
+    {"Status Automatikgetriebe", "-", "1 = Verbindung"},
+    {"Status ABS", "-", "1 = Verbindung"},
+    {"Status Kombiinstrument", "-", "1 = Verbindung"},
+    {"Status Airbag", "-", "1 = Verbindung"}}},
+};
+
+const int MWB_TABLE_SIZE = sizeof(MWB_TABLE) / sizeof(MWB_TABLE[0]);
+
+// Index in MWB_TABLE oder -1, wenn der Block nicht in der Tabelle steht
+int findMwbIndex(uint8_t group) {
+  for (int i = 0; i < MWB_TABLE_SIZE; i++) {
+    if (MWB_TABLE[i].group == group) return i;
+  }
+  return -1;
+}
 
 // =====================================================
 // FUNKTIONSPROTOTYPEN
@@ -231,21 +420,25 @@ bool sendCoding(
   uint16_t requestedCoding,
   uint32_t requestedWSC);
 
-bool readMeasurementBlock000(bool printAllFields);
-bool readMeasurementBlock001(bool printAllFields);
-bool readMeasurementBlock006(bool printAllFields);
-bool readMeasurementBlock011(bool printAllFields);
-bool readMeasurementBlock008(bool printAllFields);
+
+void decodeKwpValue(KwpValue &v);
+
+bool readMeasurementGroup(
+  uint8_t group,
+  KwpValue values[],
+  uint8_t &fieldCount,
+  bool printAllFields);
+
+bool readMeasurement(
+  uint8_t group,
+  uint8_t field,
+  KwpValue &out,
+  bool printAllFields);
+
 
 void calculateFuelConsumption();
 
-void clearSerialInput();
 
-bool readSerialNumber(
-  uint32_t &value,
-  uint32_t timeoutMs,
-  bool allowEmpty,
-  uint32_t defaultValue);
 
 int16_t getCenteredX(String text) {
   int16_t x1, y1;
@@ -1032,11 +1225,12 @@ bool connectMSG() {
   kwpConnected = true;
   Coding = 2;
   WSC = 0;
-
+ 
   Serial.println("TESTBENCH: Fahrzeugverbindung simuliert.");
-
   return true;
 #endif
+
+  // Ab hier bleibt der bisherige Code von connectMSG()
 
   if (kwpConnected) {
     return true;
@@ -1235,365 +1429,132 @@ bool sendCoding(
 
 
 // =====================================================
-// MESSWERTBLOCK 000 LESEN
-//
-// KWP1281 B10:
-//   03 ZZ 12 03
-//
-// Kein Gruppenbyte mitsenden.
-//
-// Antwort:
-//   N-1 ZZ F4 Feld1 ... Feld10 03
+// KWP1281 MESSWERT UMRECHNUNG ANHAND KENNZAHL
+// Quelle: Klien Kennzahlen.xlsx
 // =====================================================
 
-bool readMeasurementBlock000(bool printAllFields) {
-  if (!kwpConnected) {
-    Serial.println(
-      "FEHLER: Keine aktive Verbindung.");
+void decodeKwpValue(KwpValue &v) {
+  double a = v.a;
+  double b = v.b;
 
-    return false;
-  }
+  v.value  = 0.0;
+  v.unit   = "";
+  v.text   = "";
+  v.isText = false;
 
-  uint8_t request[4];
+  switch (v.formula) {
+    case 1:  v.value = 0.2 * a * b;               v.unit = "U/min";   break;
+    case 2:  v.value = a * 0.002 * b;             v.unit = "%";       break;
+    case 3:  v.value = 0.002 * a * b;             v.unit = "Deg";     break;
+    case 4:  v.value = fabs(b - 127) * 0.01 * a;
+             v.unit  = (v.b > 127) ? "ATDC" : "BTDC";                break;
+    case 5:  v.value = a * (b - 100) * 0.1;       v.unit = "C";       break;
+    case 6:  v.value = 0.001 * a * b;             v.unit = "V";       break;
+    case 7:  v.value = 0.01 * a * b;              v.unit = "km/h";    break;
+    case 8:  v.value = 0.1 * a * b;               v.unit = "";        break;
+    case 9:  v.value = (b - 127) * 0.02 * a;      v.unit = "Deg";     break;
+    case 10: v.isText = true; v.text = (v.b == 0) ? "COLD" : "WARM";  break;
+    case 11: v.value = 0.0001 * a * (b - 128) + 1; v.unit = "";       break;
+    case 12: v.value = 0.001 * a * b;             v.unit = "Ohm";     break;
+    case 13: v.value = (b - 127) * 0.001 * a;     v.unit = "mm";      break;
+    case 14: v.value = 0.005 * a * b;             v.unit = "bar";     break;
+    case 15: v.value = 0.01 * a * b;              v.unit = "ms";      break;
+    case 16: v.isText = true; v.value = v.b;
+             v.text = String(v.b, BIN);           v.unit = "bit";     break;
+    case 17: v.isText = true;
+             v.text = String((char)v.a) + String((char)v.b);          break;
+    case 18: v.value = 0.04 * a * b;              v.unit = "mBar";    break;
+    case 19: v.value = 0.01 * a * b;              v.unit = "l";       break;
+    case 20: v.value = a * (b - 128) / 128.0;     v.unit = "%";       break;
+    case 21: v.value = 0.001 * a * b;             v.unit = "V";       break;
+    case 22: v.value = 0.001 * a * b;             v.unit = "ms";      break;
+    case 23: v.value = b / 256.0 * a;             v.unit = "%";       break;
+    case 24: v.value = 0.001 * a * b;             v.unit = "A";       break;
+    case 25: v.value = (b * 1.421) + (a / 182.0); v.unit = "g/s";     break;
+    case 26: v.value = b - a;                     v.unit = "C";       break;
+    case 27: v.value = fabs(b - 128) * 0.01 * a;
+             v.unit  = (v.b < 128) ? "ATDC" : "BTDC";                break;
+    case 28: v.value = b - a;                     v.unit = "";        break;
+    case 29: v.isText = true;
+             v.text = (v.b < v.a) ? "1.Kennfeld" : "2.Kennfeld";      break;
+    case 30: v.value = b / 12.0 * a;              v.unit = "Deg k/w"; break;
+    case 31: v.value = b / 2560.0 * a;            v.unit = "C";       break;
+    case 32: v.value = (v.b > 128) ? (b - 256) : b; v.unit = "";      break;
+    case 33: v.value = (v.a == 0) ? (100 * b) : (100 * b / a);
+             v.unit  = "%";                                           break;
+    case 34: v.value = (b - 128) * 0.01 * a;      v.unit = "kW";      break;
+    case 35: v.value = 0.01 * a * b;              v.unit = "l/h";     break;
+    case 36: v.value = a * 2560 + b * 10;         v.unit = "km";      break;
+    case 37: v.isText = true; v.value = v.b;
+             v.text = "Oil Pr. 2 < min";                              break;
+    case 38: v.value = (b - 128) * 0.001 * a;     v.unit = "Deg k/w"; break;
+    case 39: v.value = b / 256.0 * a;             v.unit = "mg/Hub";  break;
+    case 40: v.value = b * 0.1 + (25.5 * a) - 400; v.unit = "A";      break;
+    case 41: v.value = b + a * 255;               v.unit = "Ah";      break;
+    case 42: v.value = b * 0.1 + (25.5 * a) - 400; v.unit = "kW";     break;
+    case 43: v.value = b * 0.1 + (25.5 * a);      v.unit = "V";       break;
+    case 44: v.isText = true;
+             v.text = String(v.a) + ":" + (v.b < 10 ? "0" : "") + String(v.b);
+             v.unit = "h:m";                                          break;
+    case 45: v.value = 0.1 * a * b / 100.0;       v.unit = "";        break;
+    case 46: v.value = (a * b - 3200) * 0.0027;   v.unit = "Deg k/w"; break;
+    case 47: v.value = (b - 128) * a;             v.unit = "ms";      break;
+    case 48: v.value = b + a * 255;               v.unit = "";        break;
+    case 49: v.value = (b / 4.0) * a * 0.1;       v.unit = "mg/Hub";  break;
+    case 50: v.value = (v.a == 0) ? ((b - 128) / 0.01)
+                                  : ((b - 128) / (0.01 * a));
+             v.unit  = "mBar";                                        break;
+    case 51: v.value = ((b - 128) / 255.0) * a;   v.unit = "mg/Hub";  break;
+    case 52: v.value = b * 0.02 * a - a;          v.unit = "Nm";      break;
+    case 53: v.value = (b - 128) * 1.4222 + 0.006 * a; v.unit = "g/s"; break;
+    case 54: v.value = a * 256 + b;               v.unit = "Count";   break;
+    case 55: v.value = a * b / 200.0;             v.unit = "s";       break;
+    case 56: v.value = a * 256 + b;               v.unit = "WSC";     break;
+    case 57: v.value = a * 256 + b + 65536;       v.unit = "WSC";     break;
+    case 58: v.value = (v.b > 128) ? (1.0225 * (256 - b)) : (1.0225 * b);
+             v.unit  = "/s";                                          break;
+    case 59: v.value = (a * 256 + b) / 32768.0;   v.unit = "";        break;
+    case 60: v.value = (a * 256 + b) * 0.01;      v.unit = "s";       break;
+    case 61: v.value = (v.a == 0) ? (b - 128) : ((b - 128) / a);
+             v.unit  = "";                                            break;
+    case 62: v.value = 0.256 * a * b;             v.unit = "S";       break;
+    case 63: v.isText = true;
+             v.text = String((char)v.a) + String((char)v.b) + "?";   break;
+    case 64: v.value = a + b;                     v.unit = "Ohm";     break;
+    case 65: v.value = 0.01 * a * (b - 127);      v.unit = "mm";      break;
+    case 66: v.value = (a * b) / 511.12;          v.unit = "V";       break;
+    case 67: v.value = (640 * a) + b * 2.5;       v.unit = "Deg";     break;
+    case 68: v.value = (256 * a + b) / 7.365;     v.unit = "deg/s";   break;
+    case 69: v.value = (256 * a + b) * 0.3254;    v.unit = "bar";     break;
+    case 70: v.value = (256 * a + b) * 0.192;     v.unit = "m/s2";    break;
 
-  request[0] = 0x03;
-  request[1] = blockCounter;
-  request[2] = 0x12;
-  request[3] = 0x03;
-
-  if (printAllFields) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("         LESE MWB 000");
-    Serial.println("========================================");
-  }
-
-  if (!kwpSendBlock(
-        request,
-        sizeof(request))) {
-    Serial.println(
-      "FEHLER: B10 konnte nicht gesendet werden.");
-
-    return false;
-  }
-
-  uint8_t response[64];
-  uint16_t responseSize = 0;
-
-  if (!kwpReceiveBlock(
-        response,
-        sizeof(response),
-        responseSize)) {
-    Serial.println(
-      "FEHLER: Keine Antwort auf B10.");
-
-    return false;
-  }
-
-  if (responseSize < 5) {
-    Serial.println(
-      "FEHLER: F4-Antwort ist zu kurz.");
-
-    return false;
-  }
-
-  if (response[2] == 0x0A) {
-    Serial.println(
-      "FEHLER: MSG meldet No-Acknowledge.");
-
-    return false;
-  }
-
-  if (response[2] != 0xF4) {
-    Serial.print(
-      "FEHLER: Antworttitel ist 0x");
-
-    printHex(response[2]);
-
-    Serial.println(", erwartet wurde 0xF4.");
-
-    return false;
-  }
-
-  uint16_t fieldCount =
-    responseSize - 4U;
-
-  if (fieldCount == 0) {
-    Serial.println(
-      "FEHLER: F4 enthaelt keine Messwerte.");
-
-    return false;
-  }
-
-  // Feld 1 liegt direkt hinter F4.
-  lastRpmRaw = response[3];
-
-lastRpm = (uint16_t)lastRpmRaw;
-
-  if (printAllFields) {
-    Serial.println();
-    Serial.print("MWB000 RAW: ");
-
-    for (
-      uint16_t i = 0;
-      i < responseSize;
-      i++) {
-      printHex(response[i]);
-      Serial.print(" ");
-    }
-
-    Serial.println();
-
-    Serial.println();
-    Serial.print("Anzahl Messwertfelder: ");
-    Serial.println(fieldCount);
-
-    for (
-      uint16_t field = 0;
-      field < fieldCount;
-      field++) {
-      Serial.print("Feld ");
-      Serial.print(field + 1);
-      Serial.print(" = ");
-
-      Serial.print(response[3 + field]);
-
-      Serial.print("  [0x");
-      printHex(response[3 + field]);
-      Serial.println("]");
-    }
-  }
-
-  Serial.println();
-  Serial.print("Drehzahl Rohwert: ");
-  Serial.println(lastRpmRaw);
-
-  Serial.print("Drehzahl berechnet: ");
-  Serial.print(lastRpm);
-  Serial.println(" U/min");
-
-  return true;
-}
-
-// =====================================================
-// KWP1281 MESSWERT UMRECHNUNG
-// =====================================================
-
-float decodeKwpValue(uint8_t formula, uint8_t a, uint8_t b) {
-  switch (formula) {
-    // Kennzahl 0x12 = 18
-    // Ladedruck / Druck
-    // Formel: 0,04 × a × b
-    case 0x12:
-      return 0.04f * (float)a * (float)b;
-
-    // Kennzahl 0x27 = 39
-    // Einspritzmenge
-    // Formel: b / 256 × a
-    case 0x27:
-      return ((float)b / 256.0f) * (float)a;
-
-    // Noch unbekannte Formel
     default:
-      return 0.0f;
+      // Unbekannte Kennzahl: Rohwert b zurueckgeben
+      v.value = b;
+      v.unit  = "?";
+      break;
   }
 }
 
-// =====================================================
-// MESSWERTBLOCK 011 LESEN
-//
-// KWP1281 Group Reading:
-//
-//   04 ZZ 29 0B 03
-//
-// Antwort:
-//
-//   LL ZZ E7
-//   Formel Wert_H Wert_L
-//   Formel Wert_H Wert_L
-//   Formel Wert_H Wert_L
-//   Formel Wert_H Wert_L
-//   03
-//
-// MWB 011:
-//
-//   Feld 1 = Motordrehzahl
-//   Feld 2 = Ladedruck Soll
-//   Feld 3 = Ladedruck Ist
-//   Feld 4 = Regelung
-// =====================================================
-
-bool readMeasurementBlock011(bool printAllFields) {
-  if (!kwpConnected) {
-    Serial.println("FEHLER: Keine aktive Verbindung.");
-    return false;
-  }
-
-  uint8_t request[5];
-
-  request[0] = 0x04;
-  request[1] = blockCounter;
-  request[2] = 0x29;
-  request[3] = 0x0B;
-  request[4] = 0x03;
-
-  if (printAllFields) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("         LESE MWB 011");
-    Serial.println("========================================");
-  }
-
-  if (!kwpSendBlock(
-        request,
-        sizeof(request))) {
-    Serial.println(
-      "FEHLER: Group Reading MWB 011 konnte nicht gesendet werden.");
-
-    return false;
-  }
-
-  uint8_t response[64];
-  uint16_t responseSize = 0;
-
-  if (!kwpReceiveBlock(
-        response,
-        sizeof(response),
-        responseSize)) {
-    Serial.println(
-      "FEHLER: Keine Antwort auf MWB 011.");
-
-    return false;
-  }
-
-  if (responseSize < 6) {
-    Serial.println(
-      "FEHLER: MWB 011 Antwort ist zu kurz.");
-
-    return false;
-  }
-
-  if (response[2] == 0x0A) {
-    Serial.println(
-      "FEHLER: MSG meldet No-Acknowledge.");
-
-    return false;
-  }
-
-  if (response[2] != 0xE7) {
-    Serial.print(
-      "FEHLER: Antworttitel ist 0x");
-
-    printHex(response[2]);
-
-    Serial.println(
-      ", erwartet wurde 0xE7.");
-
-    return false;
-  }
-
-  if (response[responseSize - 1] != 0x03) {
-    Serial.println(
-      "FEHLER: MWB 011 Antwort ohne ETX.");
-
-    return false;
-  }
-
-  // Anzahl Messwertfelder
-  uint16_t dataBytes = responseSize - 4;
-
-  if ((dataBytes % 3) != 0) {
-    Serial.println(
-      "FEHLER: MWB 011 Datenformat ist ungueltig.");
-
-    return false;
-  }
-
-  uint16_t fieldCount = dataBytes / 3;
-
-  if (printAllFields) {
-    Serial.print("Anzahl Messwertfelder: ");
-    Serial.println(fieldCount);
-
-    Serial.println();
-    Serial.print("MWB011 RAW: ");
-
-    for (uint16_t i = 0; i < responseSize; i++) {
-      printHex(response[i]);
-      Serial.print(" ");
-    }
-
-    Serial.println();
-  }
-
-  // Bis zu 4 Felder auswerten
-  for (uint16_t field = 0; field < fieldCount && field < 4; field++) {
-    uint16_t pos = 3 + (field * 3);
-
-    uint8_t formula = response[pos];
-
-    uint8_t a = response[pos + 1];
-    uint8_t b = response[pos + 2];
-
-    float value = decodeKwpValue(formula, a, b);
-
-    if (printAllFields) {
-      Serial.print("Feld ");
-      Serial.print(field + 1);
-
-      Serial.print("  Formel=0x");
-      printHex(formula);
-
-      Serial.print("  RAW=0x");
-      printHex(response[pos + 1]);
-      printHex(response[pos + 2]);
-
-      Serial.print("  Wert=");
-      Serial.println(value);
-    }
-
-    // Feld 3 = Ladedruck Ist
-    if (field == 2) {
-      lastBoostRaw = value;
-      lastBoostMbar = 0.04 * a * b;
-
-      Serial.println();
-      Serial.println("----------------------------------------");
-      Serial.println("        LADEDRUCK IST");
-      Serial.println("----------------------------------------");
-
-      Serial.print("Formel: 0x");
-      printHex(formula);
-      Serial.println();
-
-      Serial.print("Rohwert: ");
-      Serial.print(value);
-      Serial.println(" mbar");
-
-      Serial.println("----------------------------------------");
-    }
-  }
-
-  return true;
-}
 
 // =====================================================
-// MESSWERTBLOCK 001 LESEN
+// MESSWERTBLOCK KOMPLETT LESEN
 //
-// MWB 001:
-//
-// Feld 1 = Drehzahl
-// Feld 2 = Einspritzmenge
-//
-// Berechnung:
-// Feld 1 Drehzahl:
-//   0.2 × a × b
-//
-// Feld 2 Einspritzmenge:
-//   b / 256 × a
+// Anfrage:  04 ZZ 29 GG 03
+// Antwort:  LL ZZ E7 [K a b] x max. 4  03
 // =====================================================
 
-bool readMeasurementBlock001(bool printAllFields) {
+bool readMeasurementGroup(
+  uint8_t group,
+  KwpValue values[],
+  uint8_t &fieldCount,
+  bool printAllFields) {
+
+  fieldCount = 0;
+
+  for (uint8_t i = 0; i < KWP_MAX_FIELDS; i++) {
+    values[i].valid = false;
+  }
 
   if (!kwpConnected) {
     Serial.println("FEHLER: Keine aktive Verbindung.");
@@ -1601,221 +1562,16 @@ bool readMeasurementBlock001(bool printAllFields) {
   }
 
   uint8_t request[5];
-
   request[0] = 0x04;
   request[1] = blockCounter;
   request[2] = 0x29;
-  request[3] = 0x01;
+  request[3] = group;
   request[4] = 0x03;
-
-  if (printAllFields) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("         LESE MWB 001");
-    Serial.println("========================================");
-  }
-
-  // -------------------------------------------------
-  // MWB 001 anfordern
-  // -------------------------------------------------
 
   if (!kwpSendBlock(request, sizeof(request))) {
-    Serial.println(
-      "FEHLER: Group Reading MWB 001 konnte nicht gesendet werden.");
-
-    return false;
-  }
-
-  // -------------------------------------------------
-  // Antwort empfangen
-  // -------------------------------------------------
-
-  uint8_t response[64];
-  uint16_t responseSize = 0;
-
-  if (!kwpReceiveBlock(
-        response,
-        sizeof(response),
-        responseSize)) {
-
-    Serial.println(
-      "FEHLER: Keine Antwort auf MWB 001.");
-
-    return false;
-  }
-
-  // -------------------------------------------------
-  // Grundprüfung
-  // -------------------------------------------------
-
-  if (responseSize < 10) {
-    Serial.println(
-      "FEHLER: MWB 001 Antwort ist zu kurz.");
-
-    return false;
-  }
-
-  if (response[2] == 0x0A) {
-    Serial.println(
-      "FEHLER: MSG meldet No-Acknowledge.");
-
-    return false;
-  }
-
-  if (response[2] != 0xE7) {
-    Serial.print(
-      "FEHLER: Antworttitel ist 0x");
-
-    printHex(response[2]);
-
-    Serial.println(
-      ", erwartet wurde 0xE7.");
-
-    return false;
-  }
-
-  // -------------------------------------------------
-  // Datenlänge
-  // -------------------------------------------------
-
-  uint16_t dataBytes = responseSize - 4;
-
-  if ((dataBytes % 3) != 0) {
-    Serial.println(
-      "FEHLER: MWB 001 Datenformat ist ungueltig.");
-
-    return false;
-  }
-
-  uint16_t fieldCount = dataBytes / 3;
-
-  if (fieldCount < 2) {
-    Serial.println(
-      "FEHLER: MWB 001 enthaelt weniger als 2 Felder.");
-
-    return false;
-  }
-
-  // -------------------------------------------------
-  // FELD 1 = DREHZAHL
-  // -------------------------------------------------
-
-  uint16_t pos1 = 3;
-
-  uint8_t formula1 = response[pos1];
-  uint8_t a1 = response[pos1 + 1];
-  uint8_t b1 = response[pos1 + 2];
-
-  float rpm =
-    0.2f * (float)a1 * (float)b1;
-
-  lastRpmRaw = a1;
-  lastRpm = (uint16_t)rpm;
-
-  // -------------------------------------------------
-  // FELD 2 = EINSPRITZMENGE
-  // -------------------------------------------------
-
-  uint16_t pos2 = 6;
-
-  uint8_t formula2 = response[pos2];
-  uint8_t a2 = response[pos2 + 1];
-  uint8_t b2 = response[pos2 + 2];
-
-  float injection =
-    ((float)b2 / 256.0f) * (float)a2;
-
-  injectionActual = injection;
-
-  // -------------------------------------------------
-  // DEBUG
-  // -------------------------------------------------
-
-  if (printAllFields) {
-
-    Serial.println();
-    Serial.print("MWB001 RAW: ");
-
-    for (uint16_t i = 0; i < responseSize; i++) {
-      printHex(response[i]);
-      Serial.print(" ");
-    }
-
-    Serial.println();
-
-    Serial.println();
-    Serial.println("FELD 1 - DREHZAHL");
-
-    Serial.print("Formel: 0x");
-    printHex(formula1);
-    Serial.println();
-
-    Serial.print("A: ");
-    Serial.println(a1);
-
-    Serial.print("B: ");
-    Serial.println(b1);
-
-    Serial.print("Berechnung: 0.2 x ");
-    Serial.print(a1);
-    Serial.print(" x ");
-    Serial.println(b1);
-
-    Serial.print("Drehzahl: ");
-    Serial.print(lastRpm);
-    Serial.println(" U/min");
-
-    Serial.println();
-    Serial.println("FELD 2 - EINSPRITZMENGE");
-
-    Serial.print("Formel: 0x");
-    printHex(formula2);
-    Serial.println();
-
-    Serial.print("A: ");
-    Serial.println(a2);
-
-    Serial.print("B: ");
-    Serial.println(b2);
-
-    Serial.print("Berechnung: ");
-    Serial.print(b2);
-    Serial.print(" / 256 x ");
-    Serial.println(a2);
-
-    Serial.print("Einspritzmenge: ");
-    Serial.print(injectionActual, 2);
-    Serial.println(" mg/Hub");
-  }
-
-  return true;
-}
-
-bool readMeasurementBlock006(bool printAllFields) {
-
-  if (!kwpConnected) {
-    Serial.println("FEHLER: Keine aktive Verbindung.");
-    return false;
-  }
-
-  uint8_t request[5];
-
-  request[0] = 0x04;
-  request[1] = blockCounter;
-  request[2] = 0x29;
-  request[3] = 0x06;
-  request[4] = 0x03;
-
-  if (printAllFields) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("         LESE MWB 006");
-    Serial.println("========================================");
-  }
-
-  if (!kwpSendBlock(request, sizeof(request))) {
-    Serial.println(
-      "FEHLER: Group Reading MWB 006 konnte nicht gesendet werden.");
+    Serial.print("FEHLER: Group Reading MWB ");
+    Serial.print(group);
+    Serial.println(" konnte nicht gesendet werden.");
     return false;
   }
 
@@ -1823,109 +1579,127 @@ bool readMeasurementBlock006(bool printAllFields) {
   uint16_t responseSize = 0;
 
   if (!kwpReceiveBlock(response, sizeof(response), responseSize)) {
-    Serial.println(
-      "FEHLER: Keine Antwort auf MWB 006.");
-    return false;
-  }
-
-  if (responseSize < 7) {
-    Serial.println(
-      "FEHLER: MWB 006 Antwort ist zu kurz.");
+    Serial.print("FEHLER: Keine Antwort auf MWB ");
+    Serial.println(group);
     return false;
   }
 
   if (response[2] == 0x0A) {
-    Serial.println(
-      "FEHLER: MSG meldet No-Acknowledge.");
+    Serial.println("FEHLER: MSG meldet No-Acknowledge.");
     return false;
   }
 
   if (response[2] != 0xE7) {
-    Serial.print(
-      "FEHLER: Antworttitel ist 0x");
+    Serial.print("FEHLER: Antworttitel ist 0x");
     printHex(response[2]);
-    Serial.println(
-      ", erwartet wurde 0xE7.");
+    Serial.println(", erwartet wurde 0xE7.");
     return false;
   }
 
   uint16_t dataBytes = responseSize - 4;
 
-  if ((dataBytes % 3) != 0) {
-    Serial.println(
-      "FEHLER: MWB 006 Datenformat ist ungueltig.");
+  if (dataBytes == 0 || (dataBytes % 3) != 0) {
+    Serial.println("FEHLER: Datenformat ist ungueltig.");
     return false;
   }
 
-  uint16_t fieldCount = dataBytes / 3;
-
-  if (fieldCount < 1) {
-    Serial.println(
-      "FEHLER: MWB 006 enthaelt kein Feld.");
-    return false;
+  uint16_t count = dataBytes / 3;
+  if (count > KWP_MAX_FIELDS) {
+    count = KWP_MAX_FIELDS;
   }
 
-  // -----------------------------------------
-  // FELD 1 = GESCHWINDIGKEIT
-  // -----------------------------------------
+  for (uint8_t f = 0; f < count; f++) {
+    uint16_t pos = 3 + (f * 3);
 
-  uint16_t pos1 = 3;
+    values[f].formula = response[pos];
+    values[f].a       = response[pos + 1];
+    values[f].b       = response[pos + 2];
 
-  uint8_t formula1 = response[pos1];
-  uint8_t a1 = response[pos1 + 1];
-  uint8_t b1 = response[pos1 + 2];
+    decodeKwpValue(values[f]);
+    values[f].valid = true;
+  }
 
-  float speed =
-    0.01f * (float)a1 * (float)b1;
-
-  currentSpeed = speed;
+  fieldCount = (uint8_t)count;
 
   if (printAllFields) {
-
     Serial.println();
-
-    Serial.print("MWB006 RAW: ");
-
+    Serial.print("MWB ");
+    Serial.print(group);
+    Serial.print(" RAW: ");
     for (uint16_t i = 0; i < responseSize; i++) {
       printHex(response[i]);
       Serial.print(" ");
     }
-
     Serial.println();
 
-    Serial.println();
-    Serial.println("FELD 1 - GESCHWINDIGKEIT");
+    for (uint8_t f = 0; f < fieldCount; f++) {
+      Serial.print("Feld ");
+      Serial.print(f + 1);
+      Serial.print("  K=");
+      Serial.print(values[f].formula);
+      Serial.print("  a=");
+      Serial.print(values[f].a);
+      Serial.print("  b=");
+      Serial.print(values[f].b);
+      Serial.print("  -> ");
 
-    Serial.print("Formel: 0x");
-    printHex(formula1);
-    Serial.println();
+      if (values[f].isText) {
+        Serial.print(values[f].text);
+      } else {
+        Serial.print(values[f].value, 2);
+      }
 
-    Serial.print("A: ");
-    Serial.println(a1);
-
-    Serial.print("B: ");
-    Serial.println(b1);
-
-    Serial.print("Berechnung: 0.01 x ");
-    Serial.print(a1);
-    Serial.print(" x ");
-    Serial.println(b1);
-
-    Serial.print("Geschwindigkeit: ");
-    Serial.print(currentSpeed, 2);
-    Serial.println(" km/h");
+      Serial.print(" ");
+      Serial.println(values[f].unit);
+    }
   }
 
   return true;
 }
 
-void calculateFuelConsumption() {
 
-  // Keine sinnvolle L/100-km-Berechnung im Stand
-  if (currentSpeed < 1.0f || lastRpm < 1) {
-    fuelConsumption = 0.0f;
-    return;
+// =====================================================
+// EINZELNEN MESSWERT LESEN
+//
+// group = Messwertblock (z.B. 1, 6, 11)
+// field = Feld 1..4
+// =====================================================
+
+bool readMeasurement(
+  uint8_t group,
+  uint8_t field,
+  KwpValue &out,
+  bool printAllFields) {
+
+  out.valid = false;
+
+  if (field < 1 || field > KWP_MAX_FIELDS) {
+    Serial.println("FEHLER: Feld muss 1 bis 4 sein.");
+    return false;
   }
+
+  KwpValue values[KWP_MAX_FIELDS];
+  uint8_t fieldCount = 0;
+
+  if (!readMeasurementGroup(group, values, fieldCount, printAllFields)) {
+    return false;
+  }
+
+  if (field > fieldCount) {
+    Serial.print("FEHLER: MWB ");
+    Serial.print(group);
+    Serial.print(" hat kein Feld ");
+    Serial.println(field);
+    return false;
+  }
+
+  out = values[field - 1];
+  return true;
+}
+
+
+
+void calculateFuelConsumption() {
 
   // 5-Zylinder, 4-Takt:
   // 5 Einspritzungen pro 2 Kurbelwellenumdrehungen
@@ -1934,472 +1708,112 @@ void calculateFuelConsumption() {
   // Dieseldichte ca. 0.832 kg/L
   const float DIESEL_DENSITY_MG_PER_L = 832000.0f;
 
-  // mg/Hub -> mg/min
+  // -------------------------------------------------
+  // VERBRAUCH PRO STUNDE (L/h)
+  // -------------------------------------------------
+
   float mgPerMinute =
     injectionActual *
     (float)lastRpm *
     INJECTIONS_PER_REV;
 
-  // mg/min -> Liter/min
-  float litersPerMinute =
-    mgPerMinute /
-    DIESEL_DENSITY_MG_PER_L;
+  float litersPerHour =
+    (mgPerMinute / DIESEL_DENSITY_MG_PER_L) * 60.0f;
 
-  // Liter/min -> Liter/100km
-  fuelConsumption =
-    (litersPerMinute * 60.0f * 100.0f) /
-    currentSpeed;
-}
+  // -------------------------------------------------
+  // IN RINGPUFFER SCHREIBEN
+  // -------------------------------------------------
 
-// =====================================================
-// MESSWERTBLOCK 008 LESEN
-//
-// MWB 008:
-//
-// Feld 1 = Einspritzmenge Fahrerwunsch
-// Feld 2 = Einspritzmengenbegrenzung Drehmoment
-// Feld 3 = Einspritzmengenbegrenzung Rauch
-//
-// Es wird immer der niedrigste Wert verwendet.
-// Dieser entspricht der tatsächlich begrenzenden
-// Einspritzmenge.
-// =====================================================
+  fuelHourBuf[fuelBufIndex] = litersPerHour;
+  speedBuf[fuelBufIndex] = currentSpeed;
 
-bool readMeasurementBlock008(bool printAllFields) {
+  fuelBufIndex = (fuelBufIndex + 1) % FUEL_AVG_SAMPLES;
 
-  if (!kwpConnected) {
-    Serial.println("FEHLER: Keine aktive Verbindung.");
-    return false;
-  }
-
-  uint8_t request[5];
-
-  request[0] = 0x04;
-  request[1] = blockCounter;
-  request[2] = 0x29;
-  request[3] = 0x08;
-  request[4] = 0x03;
-
-  if (printAllFields) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("         LESE MWB 008");
-    Serial.println("========================================");
+  if (fuelBufCount < FUEL_AVG_SAMPLES) {
+    fuelBufCount++;
   }
 
   // -------------------------------------------------
-  // MWB 008 anfordern
+  // MITTELWERTE (L/h und km/h getrennt)
   // -------------------------------------------------
 
-  if (!kwpSendBlock(
-        request,
-        sizeof(request))) {
+  float sumFuel = 0.0f;
+  float sumSpeed = 0.0f;
 
-    Serial.println(
-      "FEHLER: Group Reading MWB 008 konnte nicht gesendet werden.");
-
-    return false;
+  for (uint8_t i = 0; i < fuelBufCount; i++) {
+    sumFuel += fuelHourBuf[i];
+    sumSpeed += speedBuf[i];
   }
 
-  // -------------------------------------------------
-  // Antwort empfangen
-  // -------------------------------------------------
-
-  uint8_t response[64];
-  uint16_t responseSize = 0;
-
-  if (!kwpReceiveBlock(
-        response,
-        sizeof(response),
-        responseSize)) {
-
-    Serial.println(
-      "FEHLER: Keine Antwort auf MWB 008.");
-
-    return false;
-  }
+  float avgFuelHour = sumFuel / fuelBufCount;
+  float avgSpeed = sumSpeed / fuelBufCount;
 
   // -------------------------------------------------
-  // Grundprüfung
+  // STAND -> 0.0 (keine Division durch 0)
   // -------------------------------------------------
 
-  if (responseSize < 6) {
-    Serial.println(
-      "FEHLER: MWB 008 Antwort ist zu kurz.");
+if (currentSpeed < 4.0f) {
 
-    return false;
-  }
+    fuelConsumption = 0.0f;
 
-  if (response[2] == 0x0A) {
-    Serial.println(
-      "FEHLER: MSG meldet No-Acknowledge.");
-
-    return false;
-  }
-
-  if (response[2] != 0xE7) {
-
-    Serial.print(
-      "FEHLER: Antworttitel ist 0x");
-
-    printHex(response[2]);
-
-    Serial.println(
-      ", erwartet wurde 0xE7.");
-
-    return false;
-  }
-
-  // -------------------------------------------------
-  // Datenlänge
-  // -------------------------------------------------
-
-  uint16_t dataBytes =
-    responseSize - 4;
-
-  if ((dataBytes % 3) != 0) {
-
-    Serial.println(
-      "FEHLER: MWB 008 Datenformat ist ungueltig.");
-
-    return false;
-  }
-
-  uint16_t fieldCount =
-    dataBytes / 3;
-
-  if (fieldCount < 3) {
-
-    Serial.println(
-      "FEHLER: MWB 008 enthaelt weniger als 3 Felder.");
-
-    return false;
-  }
-
-  // -------------------------------------------------
-  // Felder auslesen
-  // -------------------------------------------------
-
-  float values[3];
-
-  for (uint16_t field = 0; field < 3; field++) {
-
-    uint16_t pos =
-      3 + (field * 3);
-
-    uint8_t formula = response[pos];
-
-    uint8_t a = response[pos + 1];
-    uint8_t b = response[pos + 2];
-
-    float value = decodeKwpValue(formula, a, b);
-
-    values[field] = value;
-
-    if (printAllFields) {
-
-      Serial.print("Feld ");
-      Serial.print(field + 1);
-
-      Serial.print("  Formel=0x");
-      printHex(formula);
-
-
-
-      Serial.print("  Wert=");
-      Serial.println(values[field], 2);
+    // Puffer zurücksetzen
+    for (uint8_t i = 0; i < FUEL_AVG_SAMPLES; i++) {
+        fuelHourBuf[i] = 0.0f;
+        speedBuf[i] = 0.0f;
     }
-  }
 
-  // -------------------------------------------------
-  // Werte speichern
-  // -------------------------------------------------
-
-  injectionDriver = values[0];
-  injectionTorque = values[1];
-  injectionSmoke = values[2];
-
-  // -------------------------------------------------
-  // Niedrigsten Wert bestimmen
-  // -------------------------------------------------
-
-  injectionActual =
-    injectionDriver;
-
-  if (injectionTorque < injectionActual) {
-    injectionActual =
-      injectionTorque;
-  }
-
-  if (injectionSmoke < injectionActual) {
-    injectionActual =
-      injectionSmoke;
-  }
-
-  if (printAllFields) {
-
-    Serial.println();
-    Serial.println("----------------------------------------");
-    Serial.print("Fahrerwunsch:       ");
-    Serial.println(injectionDriver, 2);
-
-    Serial.print("Drehmomentbegrenz.: ");
-    Serial.println(injectionTorque, 2);
-
-    Serial.print("Rauchbegrenzung:    ");
-    Serial.println(injectionSmoke, 2);
-
-    Serial.println("----------------------------------------");
-
-    Serial.print("EINSPRITZMENGE IST: ");
-    Serial.println(injectionActual, 2);
-
-    Serial.println("----------------------------------------");
-  }
-
-  return true;
+    fuelBufCount = 0;
+    fuelBufIndex = 0;
 }
 
-// =====================================================
-// CODIERUNG LESEN
-// =====================================================
+  // -------------------------------------------------
+  // GEGLAETTETER VERBRAUCH L/100km
+  // -------------------------------------------------
 
-void readCodingCommand() {
-  if (!connectMSG()) {
-    return;
+  else {
+    fuelConsumption = avgFuelHour * 100.0f / avgSpeed;
   }
 
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("        AKTUELLE MSG-DATEN");
-  Serial.println("========================================");
-
-  Serial.print("Codierung: ");
-  Serial.println(Coding);
-
-  Serial.print("WSC: ");
-  Serial.println(WSC);
-
-  Serial.println("========================================");
-
-  disconnectMSG();
+  Serial.print("Verbrauch: ");
+  Serial.print(litersPerHour, 2);
+  Serial.print(" L/h roh  |  ");
+  Serial.print(fuelConsumption, 1);
+  Serial.println(" L/100km geglaettet");
 }
 
 
 
-
 // =====================================================
-// CODIERUNG AENDERN
-// =====================================================
-void changeCodingCommand() {
-  // 1. Erst verbinden, um aktuelle Werte zu lesen
-  if (!connectMSG()) {
-    return;
-  }
-
-  uint16_t oldCoding = Coding;
-  uint32_t oldWSC = WSC;
-
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("         CODIERUNG AENDERN");
-  Serial.println("========================================");
-
-  Serial.print("Aktuelle Codierung: ");
-  Serial.println(oldCoding);
-
-  Serial.print("Aktueller WSC: ");
-  Serial.println(oldWSC);
-
-  // 2. Verbindung sauber trennen, WAEHREND der User tippt
-  disconnectMSG();
-
-  clearSerialInput();
-
-  Serial.println();
-  Serial.println(
-    "Neue Codierung eingeben und Enter druecken:");
-
-  uint32_t inputCoding = 0;
-
-  if (!readSerialNumber(inputCoding, 30000, false, 0)) {
-    Serial.println("FEHLER: Keine Codierung eingegeben.");
-    return;
-  }
-
-  if (inputCoding > 32767) {
-    Serial.println("FEHLER: Codierung muss 0 bis 32767 sein.");
-    return;
-  }
-
-  clearSerialInput();
-
-  Serial.println();
-  Serial.print("Neuen WSC eingeben oder nur Enter fuer ");
-  Serial.println(oldWSC);
-
-  uint32_t inputWSC = oldWSC;
-
-  if (!readSerialNumber(inputWSC, 30000, true, oldWSC)) {
-    inputWSC = oldWSC;
-  }
-
-  if (inputWSC > 131071UL) {
-    Serial.println("FEHLER: WSC muss 0 bis 131071 sein.");
-    return;
-  }
-
-  if (inputCoding == oldCoding && inputWSC == oldWSC) {
-    Serial.println();
-    Serial.println("Codierung und WSC sind bereits identisch.");
-    return;
-  }
-
-  // 3. Jetzt ERNEUT verbinden, direkt bevor gesendet wird
-  if (!connectMSG()) {
-    Serial.println("FEHLER: Erneute Verbindung fehlgeschlagen.");
-    return;
-  }
-
-  sendCoding((uint16_t)inputCoding, inputWSC);
-
-  disconnectMSG();
-}
-
-// =====================================================
-// OLED - NORMALE MESSWERTANZEIGE Drehzahl, Ladedruck
+// OLED - NORMALE MESSWERTANZEIGE
 // =====================================================
 
-
-void oledShowNormal() {
-
+void oledShowValue(String value, String unit) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-
-  // =====================================================
-  // DREHZAHL
-  // =====================================================
-
-  if (displayMode == MODE_RPM) {
-
-    String title = "";
-    int16_t tx = getCenteredX(title);
-
-    display.setCursor(tx, 8);
-    display.print(title);
-
-    display.setTextSize(2);
-
-    String value = String(lastRpm);
-    tx = getCenteredX(value);
-
-    display.setCursor(tx, 23);
-    display.print(value);
-
-    display.setTextSize(1);
-
-    String unit = "U/min";
-    tx = getCenteredX(unit);
-
-    display.setCursor(tx, 40);
-    display.print(unit);
-  }
-
-  // =====================================================
-  // LADEDRUCK
-  // =====================================================
-
-  else if (displayMode == MODE_IDLE) {
-
-    String title = "";
-    int16_t tx = getCenteredX(title);
-
-    display.setCursor(tx, 8);
-    display.print(title);
-
-    display.setTextSize(2);
-
-    String value = String(lastBoostMbar);
-    tx = getCenteredX(value);
-
-    display.setCursor(tx, 23);
-    display.print(value);
-
-    display.setTextSize(1);
-
-    String unit = "mBar";
-    tx = getCenteredX(unit);
-
-    display.setCursor(tx, 40);
-    display.print(unit);
-  }
-
-// =====================================================
-// VERBRAUCH
-// =====================================================
-
-else if (displayMode == MODE_CONSUMPTION) {
-
-  display.setTextSize(1);
-
-  String title = "";
-  int16_t tx = getCenteredX(title);
-
-  display.setCursor(tx, 8);
-  display.print(title);
 
   display.setTextSize(2);
-
-  String value = String(fuelConsumption, 1);
-  tx = getCenteredX(value);
-
-  display.setCursor(tx, 23);
+  display.setCursor(getCenteredX(value), 23);
   display.print(value);
 
   display.setTextSize(1);
-
-  String unit = "L/100km";
-  tx = getCenteredX(unit);
-
-  display.setCursor(tx, 40);
+  display.setCursor(getCenteredX(unit), 40);
   display.print(unit);
-}
 
-  // =====================================================
-  // OLED EINSPRITZMENGE
-  // =====================================================
-
-  else if (displayMode == MODE_INJECTION) {
-
-    display.setTextSize(1);
-
-    String title = "";
-    int16_t tx = getCenteredX(title);
-
-    display.setCursor(tx, 8);
-    display.print(title);
-
-    display.setTextSize(2);
-
-    String value =
-      String(injectionActual, 1);
-
-    tx = getCenteredX(value);
-
-    display.setCursor(tx, 23);
-    display.print(value);
-
-    display.setTextSize(1);
-
-    String unit = "mg/Hub";
-    tx = getCenteredX(unit);
-
-    display.setCursor(tx, 40);
-    display.print(unit);
-  }
   display.display();
 }
+
+void oledShowNormal() {
+  if (displayMode == MODE_RPM) {
+    oledShowValue(String(lastRpm), "U/min");
+  } else if (displayMode == MODE_BOOST) {
+    oledShowValue(String(lastBoostMbar), "mBar");
+  } else if (displayMode == MODE_CONSUMPTION) {
+    oledShowValue(String(fuelConsumption, 1), "L/100km");
+  } else if (displayMode == MODE_INJECTION) {
+    oledShowValue(String(injectionActual, 1), "mg/Hub");
+  }
+}
+
 // =====================================================
 // OLED - CODEBLOCK MODUS
 // =====================================================
@@ -2538,6 +1952,26 @@ unsigned long lastVoltageDisplay = 0;
 
 float measuredVoltage = 0.0;
 
+// =====================================================
+// SPANNUNG NUR MESSEN (ohne OLED)
+// =====================================================
+
+void measureVoltage() {
+  long adcSum = 0;
+
+  for (int i = 0; i < NUM_SAMPLES; i++) {
+    adcSum += analogRead(VOLTAGE_PIN);
+    delayMicroseconds(500);
+  }
+
+  float adcValue = adcSum / (float)NUM_SAMPLES;
+  float adcVoltage = (adcValue / 4095.0) * 3.3;
+
+  measuredVoltage =
+    adcVoltage * ((R_TOP + R_BOTTOM) / R_BOTTOM);
+
+  measuredVoltage += voltageOffset;
+}
 
 // =====================================================
 // SPANNUNG MESSEN UND ANZEIGEN
@@ -2557,35 +1991,7 @@ void updateVoltageDisplay() {
 
   lastVoltageDisplay = millis();
 
-  // ------------------------------------------
-  // ADC Mittelwert
-  // ------------------------------------------
-
-  long adcSum = 0;
-
-  for (int i = 0; i < NUM_SAMPLES; i++) {
-    adcSum += analogRead(VOLTAGE_PIN);
-    delayMicroseconds(500);
-  }
-
-  float adcValue =
-    adcSum / (float)NUM_SAMPLES;
-
-  // ------------------------------------------
-  // ADC Spannung
-  // ------------------------------------------
-
-  float adcVoltage =
-    (adcValue / 4095.0) * 3.3;
-
-  // ------------------------------------------
-  // Eingangsspannung
-  // ------------------------------------------
-
-  measuredVoltage =
-    adcVoltage * ((R_TOP + R_BOTTOM) / R_BOTTOM);
-
-  measuredVoltage += voltageOffset;
+  measureVoltage();
 
   // ------------------------------------------
   // Serieller Monitor
@@ -2633,7 +2039,7 @@ void updateVoltageDisplay() {
 
 
   String voltageText =
-    String(measuredVoltage, 2) + "V";
+    String(measuredVoltage, 1) + " V";
 
   // Eigene GFX-Schrift aktivieren
   display.setFont(&FreeSans9pt7b);
@@ -2675,7 +2081,7 @@ void enterCodeblockMode() {
   Serial.println("========================================");
 
   displayMode = MODE_CODEBLOCK;
-  codeblockMode = true;
+
 
   // -------------------------------------------------
   // Verbindung herstellen
@@ -2882,44 +2288,39 @@ void IRAM_ATTR handleButtonISR() {
 
 void handleButton() {
 
-  // Rohen Zustand sicher aus der ISR uebernehmen
-  noInterrupts();
-  bool rawPressed = btnRawPressed;
-  uint32_t rawChangeTime = btnRawChangeTime;
-  interrupts();
-
+  bool rawPressed = (digitalRead(BUTTON_INPUT) == LOW);
   uint32_t now = millis();
 
-  // ------------------------------------------
-  // ENTPRELLUNG
-  // Der Pegel gilt erst als stabil, wenn seit
-  // der letzten Flanke die Entprellzeit ohne
-  // weitere Aenderung vergangen ist.
-  // ------------------------------------------
+  static bool lastRaw = false;
+  static uint32_t lastChange = 0;
 
-  if ((now - rawChangeTime) < BUTTON_DEBOUNCE_MS) {
+  // Flanke erkannt -> Entprellzeit neu starten
+  if (rawPressed != lastRaw) {
+    lastRaw = rawPressed;
+    lastChange = now;
     return;
   }
 
-  // Kein Wechsel gegenueber dem letzten stabilen Zustand
+  // Pegel noch nicht lange genug stabil
+  if ((now - lastChange) < BUTTON_DEBOUNCE_MS) {
+    return;
+  }
+
+  // Kein Wechsel zum letzten stabilen Zustand
   if (rawPressed == btnStablePressed) {
     return;
   }
 
-  // ------------------------------------------
-  // ECHTER, STABILER ZUSTANDSWECHSEL
-  // ------------------------------------------
-
   btnStablePressed = rawPressed;
 
   if (btnStablePressed) {
-    // Neu gedrueckt
     btnPressStart = now;
     return;
   }
 
-  // Neu losgelassen -> Ereignis auswerten
   uint32_t pressTime = now - btnPressStart;
+
+
 
   Serial.print("TASTER LOSGELASSEN: ");
   Serial.print(pressTime);
@@ -2962,11 +2363,11 @@ void handleButton() {
 
     } else if (displayMode == MODE_RPM) {
 
-      displayMode = MODE_IDLE;
+      displayMode = MODE_BOOST;
       Serial.println("MODE: LADEDRUCK");
       oledShowNormal();
 
-    } else if (displayMode == MODE_IDLE) {
+    } else if (displayMode == MODE_BOOST) {
 
       displayMode = MODE_CONSUMPTION;
       Serial.println("MODE: VERBRAUCH");
@@ -2991,7 +2392,8 @@ void handleButton() {
 
       displayMode = MODE_VOLTAGE;
       Serial.println("MODE: SPANNUNG");
-      oledShowNormal();
+      lastVoltageDisplay = 0;
+      updateVoltageDisplay();
     }
   }
 }
@@ -3002,21 +2404,29 @@ void handleButton() {
 
 void updateMeasurements() {
 
+  bool webActive = webClientActive();
+
   // =====================================================
   // SPANNUNG
   // =====================================================
 
   if (displayMode == MODE_VOLTAGE) {
 
-    if (kwpConnected) {
+    // Ohne Webseite: MSG-Verbindung wie bisher beenden
+    if (!webActive && kwpConnected) {
       disconnectMSG();
     }
+
     updateVoltageDisplay();
-    return;
+
+    // Ohne Webseite kein KWP-Lesen im Spannungsmodus
+    if (!webActive) {
+      return;
+    }
   }
 
   // =====================================================
-  // CODEBLOCK
+  // CODEBLOCK -> nie für Web lesen
   // =====================================================
 
   if (displayMode == MODE_CODEBLOCK) {
@@ -3024,7 +2434,7 @@ void updateMeasurements() {
   }
 
   // =====================================================
-  // LEERLAUF / DREHZAHL
+  // INTERVALL
   // =====================================================
 
   if (millis() - lastMeasurementTime < MEASUREMENT_INTERVAL_MS) {
@@ -3033,35 +2443,26 @@ void updateMeasurements() {
 
   lastMeasurementTime = millis();
 
+  // Spannung für Web auch außerhalb des Spannungsmodus
+  if (webActive && displayMode != MODE_VOLTAGE) {
+    measureVoltage();
+  }
+
   // Verbindung herstellen
   if (!kwpConnected) {
-
-#if TESTBENCH_MODE
-
-    kwpConnected = true;
-
-#else
-
     if (!connectMSG()) {
       return;
     }
-
-#endif
   }
+
   // =====================================================
   // MESSWERT LESEN
   // =====================================================
 
 #if TESTBENCH_MODE
 
-  // Im TestBench Beispielwerte
-  lastRpmRaw = 36;
   lastRpm = 900;
-
-  lastBoostRaw = 1000;
   lastBoostMbar = 1000;
-
-  // Testwert Einspritzmenge
   injectionActual = 42.5;
 
   bool readOk = true;
@@ -3069,30 +2470,87 @@ void updateMeasurements() {
 #else
   bool readOk = false;
 
+  KwpValue v;
+
   // ================================================
-  // DREHZAHL -> MWB 001
+  // WEBSEITE OFFEN -> ALLE LIVEWERTE
+  // MWB 001 Feld 1+2, MWB 011 Feld 3
   // ================================================
 
-  if (displayMode == MODE_RPM) {
-    readOk = readMeasurementBlock001(false);
+  if (webActive && mwbActive()) {
+    // MWB-Seite offen: nur den gewählten Block lesen
+    uint8_t n = 0;
+    readOk = readMeasurementGroup(webMwbGroup, mwbData, n, false);
+    if (readOk) {
+      mwbCount = n;
+      mwbDataGroup = webMwbGroup;
+      mwbError = false;
+    } else {
+      mwbCount = 0;
+      mwbError = true;
+    }
+  }
+
+  else if (webActive) {
+    KwpValue g1[KWP_MAX_FIELDS];
+    uint8_t n = 0;
+
+    if (readMeasurementGroup(1, g1, n, false) && n >= 2) {
+      lastRpm = (uint16_t)g1[0].value;
+      injectionActual = (float)g1[1].value;
+
+      if (readMeasurement(11, 3, v, false)) {
+        lastBoostMbar = (uint16_t)v.value;
+        readOk = true;
+      }
+
+      // OLED zeigt Verbrauch -> zusätzlich Geschwindigkeit
+      if (readOk && displayMode == MODE_CONSUMPTION) {
+        readOk = readMeasurement(6, 1, v, false);
+        if (readOk) {
+          currentSpeed = (float)v.value;
+          calculateFuelConsumption();
+        }
+      }
+    }
   }
 
   // ================================================
-  // LADEDRUCK -> MWB 011
+  // DREHZAHL -> MWB 001 Feld 1
   // ================================================
 
-  else if (displayMode == MODE_IDLE) {
-    readOk = readMeasurementBlock011(false);
+  else if (displayMode == MODE_RPM) {
+    readOk = readMeasurement(1, 1, v, false);
+    if (readOk) {
+      lastRpm = (uint16_t)v.value;
+    }
   }
 
   // ================================================
-  // VERBRAUCH -> MWB 001 + MWB 006
+  // LADEDRUCK -> MWB 011 Feld 3
+  // ================================================
+
+  else if (displayMode == MODE_BOOST) {
+    readOk = readMeasurement(11, 3, v, false);
+    if (readOk) {
+      lastBoostMbar = (uint16_t)v.value;
+    }
+  }
+
+  // ================================================
+  // VERBRAUCH -> MWB 001 Feld 1+2, MWB 006 Feld 1
   // ================================================
 
   else if (displayMode == MODE_CONSUMPTION) {
+    KwpValue g1[KWP_MAX_FIELDS];
+    uint8_t n = 0;
 
-    if (readMeasurementBlock001(false)) {
-      if (readMeasurementBlock006(false)) {
+    if (readMeasurementGroup(1, g1, n, false) && n >= 2) {
+      lastRpm = (uint16_t)g1[0].value;
+      injectionActual = (float)g1[1].value;
+
+      if (readMeasurement(6, 1, v, false)) {
+        currentSpeed = (float)v.value;
         calculateFuelConsumption();
         readOk = true;
       }
@@ -3100,11 +2558,14 @@ void updateMeasurements() {
   }
 
   // ================================================
-  // EINSPRITZMENGE -> MWB 008
+  // EINSPRITZMENGE -> MWB 001 Feld 2
   // ================================================
 
   else if (displayMode == MODE_INJECTION) {
-    readOk = readMeasurementBlock001(false);
+    readOk = readMeasurement(1, 2, v, false);
+    if (readOk) {
+      injectionActual = (float)v.value;
+    }
   }
 
   // ================================================
@@ -3117,240 +2578,291 @@ void updateMeasurements() {
     Serial.println("Messwert fehlgeschlagen.");
     Serial.println("Verbindung wird zurueckgesetzt.");
 
-    // Hart trennen, kein B03 mehr senden.
-    // Das MSG antwortet ohnehin nicht mehr.
     stopKLine(true);
     kwpConnected = false;
 
-    // Beim naechsten Durchlauf wird neu verbunden.
     return;
   }
 
 #endif
+
   // =====================================================
-  // OLED
+  // OLED (im Spannungsmodus macht oledShowNormal nichts)
   // =====================================================
 
   oledShowNormal();
 }
 
 // =====================================================
-// SERIELLEN EINGANG LEEREN
+// WEBSEITE
 // =====================================================
 
-void clearSerialInput() {
-  while (Serial.available()) {
-    Serial.read();
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TDI Dashboard</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#eee}
+header{padding:14px 16px;font-size:20px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+#st{font-size:13px;padding:4px 10px;border-radius:12px;background:#555}
+#st.ok{background:#1b7f3a}
+#st.err{background:#a12a2a}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}
+.card{background:#1e1e1e;border-radius:12px;padding:16px;text-align:center}
+.lbl{font-size:13px;color:#999}
+.val{font-size:34px;font-weight:700;margin:6px 0 2px}
+.unit{font-size:13px;color:#999}
+</style>
+</head>
+<body>
+<header>TDI Dashboard<span id="st">...</span></header>
+<div class="grid">
+  <div class="card"><div class="lbl">Drehzahl</div><div class="val" id="rpm">-</div><div class="unit">U/min</div></div>
+  <div class="card"><div class="lbl">Ladedruck</div><div class="val" id="boost">-</div><div class="unit">mbar</div></div>
+  <div class="card"><div class="lbl">Einspritzmenge</div><div class="val" id="inj">-</div><div class="unit">mg/Hub</div></div>
+  <div class="card"><div class="lbl">Spannung</div><div class="val" id="volt">-</div><div class="unit">V</div></div>
+</div>
+<div style="padding:0 12px 16px"><a href="/mwb" style="color:#6cf;text-decoration:none">Messwerteblöcke →</a></div>
+<script>
+const st = document.getElementById('st');
+
+async function upd() {
+  try {
+    const r = await fetch('/api/live', { cache: 'no-store' });
+    const d = await r.json();
+
+    for (const k of ['rpm', 'boost', 'inj']) {
+      document.getElementById(k).textContent = d.connected ? d[k] : '-';
+    }
+    document.getElementById('volt').textContent = d.volt;
+
+    st.textContent = d.connected ? 'MSG verbunden' : 'MSG getrennt';
+    st.className = d.connected ? 'ok' : 'err';
+  } catch (e) {
+    st.textContent = 'ESP offline';
+    st.className = 'err';
   }
+
+  // Erst nach Antwort neu anfragen -> kein Request-Stau
+  setTimeout(upd, 500);
 }
 
+upd();
+</script>
+</body>
+</html>
+)rawliteral";
+
 
 // =====================================================
-// ZAHL ÜBER SERIAL EINLESEN
-//
-// value         = Ergebnis
-// timeoutMs     = maximale Wartezeit
-// allowEmpty    = leere Eingabe erlaubt?
-// defaultValue  = Wert bei leerer Eingabe
-//
-// Nur Ziffern 0-9 werden akzeptiert.
-// Enter beendet die Eingabe.
+// WEB-HANDLER
 // =====================================================
 
-bool readSerialNumber(
-  uint32_t &value,
-  uint32_t timeoutMs,
-  bool allowEmpty,
-  uint32_t defaultValue) {
-  String input = "";
+void handleRoot() {
+  lastWebRequest = millis();
+  server.send(200, "text/html", INDEX_HTML);
+}
 
-  uint32_t startTime = millis();
+void handleApiLive() {
+  lastWebRequest = millis();
 
-  while (true) {
-    // ------------------------------------------
-    // TIMEOUT
-    // ------------------------------------------
+  String json = "{";
+  json += "\"connected\":";
+  json += kwpConnected ? "true" : "false";
+  json += ",\"rpm\":";
+  json += String(lastRpm);
+  json += ",\"boost\":";
+  json += String(lastBoostMbar);
+  json += ",\"inj\":";
+  json += String(injectionActual, 1);
+  json += ",\"volt\":";
+  json += String(measuredVoltage, 1);
+  json += "}";
 
-    if (
-      (uint32_t)(millis() - startTime) >= timeoutMs) {
-      Serial.println();
-      Serial.println("FEHLER: Eingabe-Timeout.");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+}
 
-      return false;
+const char MWB_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Messwerteblock</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#eee}
+header{padding:14px 16px;font-size:20px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+a{color:#6cf;text-decoration:none;font-size:14px}
+#st{font-size:13px;padding:4px 10px;border-radius:12px;background:#555}
+#st.ok{background:#1b7f3a}
+#st.err{background:#a12a2a}
+.sel{display:flex;gap:8px;padding:0 12px 12px;align-items:center}
+.sel button{background:#2a2a2a;color:#eee;border:0;border-radius:10px;font-size:22px;width:52px;height:48px}
+.sel input{flex:1;min-width:0;background:#1e1e1e;color:#eee;border:1px solid #333;border-radius:10px;font-size:22px;height:48px;text-align:center}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}
+.card{background:#1e1e1e;border-radius:12px;padding:16px;text-align:center}
+.lbl{font-size:13px;color:#999}
+.val{font-size:30px;font-weight:700;margin:6px 0 2px;word-break:break-all}
+.unit{font-size:13px;color:#999}
+.raw{font-size:11px;color:#666;margin-top:6px}
+.soll{font-size:12px;color:#8c8;margin-top:6px}
+#msg{padding:0 16px 12px;color:#999;font-size:14px}
+</style>
+</head>
+<body>
+<header><span>Messwerteblock</span><span id="st">...</span></header>
+<div style="padding:0 16px 12px"><a href="/">&larr; Dashboard</a></div>
+<div class="sel">
+  <button id="prev">&minus;</button>
+  <input id="grp" type="number" min="1" max="255" inputmode="numeric">
+  <button id="next">+</button>
+</div>
+<div id="msg"></div>
+<div class="grid" id="grid"></div>
+<script>
+const st = document.getElementById('st');
+const grp = document.getElementById('grp');
+const grid = document.getElementById('grid');
+const msg = document.getElementById('msg');
+
+let g = parseInt(localStorage.getItem('mwbGroup')) || 1;
+grp.value = g;
+
+function setG(v) {
+  v = Math.max(1, Math.min(255, parseInt(v) || 1));
+  g = v;
+  grp.value = v;
+  localStorage.setItem('mwbGroup', v);
+  grid.innerHTML = '';
+  msg.textContent = 'Lade Block ' + v + '...';
+}
+
+document.getElementById('prev').onclick = () => setG(g - 1);
+document.getElementById('next').onclick = () => setG(g + 1);
+grp.onchange = () => setG(grp.value);
+
+function card(i, f) {
+  const c = document.createElement('div');
+  c.className = 'card';
+  const mk = (cls, txt) => {
+    const e = document.createElement('div');
+    e.className = cls;
+    e.textContent = txt;
+    c.appendChild(e);
+  };
+  const named = f.n && f.n !== '-';
+  mk('lbl', named ? f.n : 'Feld ' + (i + 1));
+  mk('val', f.v);
+  mk('unit', f.u || '\u00a0');
+  mk('raw', 'Feld ' + (i + 1) + '  K=' + f.k + '  a=' + f.a + '  b=' + f.b);
+  return c;
+}
+
+async function upd() {
+  try {
+    const r = await fetch('/api/mwb?group=' + g, { cache: 'no-store' });
+    const d = await r.json();
+
+    st.textContent = d.connected ? 'MSG verbunden' : 'MSG getrennt';
+    st.className = d.connected ? 'ok' : 'err';
+
+    if (d.group === g && d.dataGroup === g && d.fields.length > 0) {
+      grid.innerHTML = '';
+      d.fields.forEach((f, i) => grid.appendChild(card(i, f)));
+      msg.textContent = 'Block ' + g +
+        (d.title ? ' – ' + d.title : '') +
+        (d.cond ? ' (' + d.cond + ')' : '');
+    } else if (d.error && d.group === g) {
+      msg.textContent = 'Block ' + g + ' konnte nicht gelesen werden.';
+    } else if (!d.connected) {
+      msg.textContent = 'Warte auf Verbindung zum MSG...';
     }
-
-
-    // ------------------------------------------
-    // AUF ZEICHEN WARTEN
-    // ------------------------------------------
-
-    if (!Serial.available()) {
-      delay(1);
-      continue;
-    }
-
-    char c = Serial.read();
-
-
-    // ------------------------------------------
-    // ENTER
-    // ------------------------------------------
-
-    if (c == '\n' || c == '\r') {
-      // ----------------------------------------
-      // LEERE EINGABE
-      // ----------------------------------------
-
-      if (input.length() == 0) {
-        if (allowEmpty) {
-          value = defaultValue;
-
-          Serial.println();
-          Serial.print("Verwende Wert: ");
-          Serial.println(value);
-
-          return true;
-        }
-
-        Serial.println();
-        Serial.println(
-          "FEHLER: Es muss eine Zahl eingegeben werden.");
-
-        Serial.print("Bitte erneut eingeben: ");
-
-        startTime = millis();
-
-        continue;
-      }
-
-
-      // ----------------------------------------
-      // STRING PRÜFEN
-      // ----------------------------------------
-
-      bool valid = true;
-
-      for (uint16_t i = 0; i < input.length(); i++) {
-        char digit = input.charAt(i);
-
-        if (
-          digit < '0' || digit > '9') {
-          valid = false;
-          break;
-        }
-      }
-
-
-      // ----------------------------------------
-      // UNGÜLTIGE EINGABE
-      // ----------------------------------------
-
-      if (!valid) {
-        Serial.println();
-        Serial.println(
-          "FEHLER: Nur Zahlen 0-9 erlaubt.");
-
-        input = "";
-
-        Serial.print("Bitte erneut eingeben: ");
-
-        startTime = millis();
-
-        continue;
-      }
-
-
-      // ----------------------------------------
-      // ZAHL UMWANDELN
-      // ----------------------------------------
-
-      uint32_t result = 0;
-
-      bool overflow = false;
-
-      for (uint16_t i = 0; i < input.length(); i++) {
-        uint8_t digit =
-          input.charAt(i) - '0';
-
-        if (
-          result > (UINT32_MAX - digit) / 10UL) {
-          overflow = true;
-          break;
-        }
-
-        result =
-          result * 10UL + digit;
-      }
-
-
-      // ----------------------------------------
-      // ZAHL ZU GROSS
-      // ----------------------------------------
-
-      if (overflow) {
-        Serial.println();
-        Serial.println(
-          "FEHLER: Zahl ist zu gross.");
-
-        input = "";
-
-        Serial.print("Bitte erneut eingeben: ");
-
-        startTime = millis();
-
-        continue;
-      }
-
-
-      // ----------------------------------------
-      // ERGEBNIS
-      // ----------------------------------------
-
-      value = result;
-
-      Serial.println();
-      Serial.print("Eingabe: ");
-      Serial.println(value);
-
-      return true;
-    }
-
-
-    // ------------------------------------------
-    // BACKSPACE
-    // ------------------------------------------
-
-    if (c == '\b' || c == 127) {
-      if (input.length() > 0) {
-        input.remove(
-          input.length() - 1);
-
-        Serial.print("\b \b");
-      }
-
-      continue;
-    }
-
-
-    // ------------------------------------------
-    // ZIFFER
-    // ------------------------------------------
-
-    if (c >= '0' && c <= '9') {
-      input += c;
-
-      Serial.print(c);
-
-      continue;
-    }
-
-
-    // ------------------------------------------
-    // ANDERE ZEICHEN IGNORIEREN
-    // ------------------------------------------
-
-    // Buchstaben, Leerzeichen usw. werden ignoriert.
+  } catch (e) {
+    st.textContent = 'ESP offline';
+    st.className = 'err';
   }
+  setTimeout(upd, 500);
+}
+
+msg.textContent = 'Lade Block ' + g + '...';
+upd();
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleMwbPage() {
+  lastWebRequest = millis();
+  server.send(200, "text/html", MWB_HTML);
+}
+
+void handleApiMwb() {
+  lastWebRequest = millis();
+  lastMwbRequest = millis();
+
+  if (server.hasArg("group")) {
+    int g = server.arg("group").toInt();
+    if (g >= 1 && g <= 255 && g != webMwbGroup) {
+      webMwbGroup = (uint8_t)g;
+      mwbCount = 0;
+      mwbDataGroup = 0;
+      mwbError = false;
+    }
+  }
+
+  int idx = findMwbIndex(webMwbGroup);
+
+  String json = "{\"connected\":";
+  json += kwpConnected ? "true" : "false";
+  json += ",\"group\":";
+  json += String(webMwbGroup);
+  json += ",\"dataGroup\":";
+  json += String(mwbDataGroup);
+  json += ",\"error\":";
+  json += mwbError ? "true" : "false";
+  json += ",\"title\":\"";
+  json += idx >= 0 ? jsonEscape(String(MWB_TABLE[idx].title)) : String("");
+  json += "\",\"cond\":\"";
+  json += idx >= 0 ? jsonEscape(String(MWB_TABLE[idx].cond)) : String("");
+  json += "\",\"fields\":[";
+
+  for (uint8_t i = 0; i < mwbCount; i++) {
+    if (i > 0) json += ",";
+
+    String val = mwbData[i].isText
+                   ? mwbData[i].text
+                   : String(mwbData[i].value, 2);
+
+    String name = "";
+    String unit = mwbData[i].unit;
+
+    if (idx >= 0 && i < 4) {
+      name = MWB_TABLE[idx].f[i].name;
+
+      // Einheit aus der Tabelle, falls die Formel keine liefert
+      if (unit == "" || unit == "?") {
+        unit = MWB_TABLE[idx].f[i].unit;
+        if (unit == "-") unit = "";
+      }
+    }
+
+    json += "{\"k\":";  json += String(mwbData[i].formula);
+    json += ",\"a\":";  json += String(mwbData[i].a);
+    json += ",\"b\":";  json += String(mwbData[i].b);
+    json += ",\"v\":\""; json += jsonEscape(val);
+    json += "\",\"u\":\""; json += jsonEscape(unit);
+    json += "\",\"n\":\""; json += jsonEscape(name);
+    json += "\"}";
+  }
+
+  json += "]}";
+
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json; charset=utf-8", json);
 }
 
 // =====================================================
@@ -3358,7 +2870,7 @@ bool readSerialNumber(
 // =====================================================
 
 void setup() {
-  // Serial ist deaktiviert und macht nichts.
+    // Serieller Monitor für Debug-Ausgaben
   Serial.begin(115200);
 
   // ------------------------------------------
@@ -3380,12 +2892,8 @@ digitalWrite(BUTTON_OUTPUT, LOW);
 
 pinMode(BUTTON_INPUT, INPUT_PULLUP);
 
-pinMode(BUTTON_INPUT, INPUT_PULLUP);
 
-attachInterrupt(
-  digitalPinToInterrupt(BUTTON_INPUT),
-  handleButtonISR,
-  CHANGE);
+
 
   // ------------------------------------------
   // LED TEST
@@ -3393,6 +2901,27 @@ attachInterrupt(
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+  
+  
+    // ------------------------------------------
+  // WLAN-HOTSPOT + WEBSERVER
+  // ------------------------------------------
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS);
+
+  // Beim ESP32-C3 SuperMini ist WLAN bei voller
+  // Sendeleistung oft instabil -> reduzieren
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+
+  server.on("/", handleRoot);
+  server.on("/api/live", handleApiLive);
+  server.on("/mwb", handleMwbPage);
+  server.on("/api/mwb", handleApiMwb);
+  server.begin();
+
+  Serial.print("Hotspot gestartet, IP: ");
+  Serial.println(WiFi.softAPIP());
 
   // ------------------------------------------
   // OLED
@@ -3431,8 +2960,8 @@ attachInterrupt(
 
   delay(1500);
 
-  // Danach normale Anzeige
-  oledShowNormal();
+  // Danach Spannungsanzeige
+  updateVoltageDisplay();
 }
 
 // =====================================================
@@ -3440,6 +2969,9 @@ attachInterrupt(
 // =====================================================
 
 void loop() {
+  // Webanfragen bearbeiten
+  server.handleClient();
+
   // Taster überwachen
   handleButton();
 

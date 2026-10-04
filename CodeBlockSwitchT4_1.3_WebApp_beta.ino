@@ -8,7 +8,7 @@
 
 
 // =====================================================
-// ESP32-C3 / L9637D / KWP1281
+// ESP32-C3 / L9637D / KWP1281 /
 //
 
 #define KLINE_TX 10
@@ -215,6 +215,163 @@ struct KwpValue {
 };
 
 const uint8_t KWP_MAX_FIELDS = 4;
+
+// =====================================================
+// WEB: FREIE MESSWERTBLOCK-ANZEIGE
+// =====================================================
+
+uint8_t  webMwbGroup   = 0;      // gewünschter Block (0 = keiner)
+uint32_t lastMwbRequest = 0;
+
+KwpValue mwbData[KWP_MAX_FIELDS];
+uint8_t  mwbCount     = 0;       // Anzahl gelesener Felder
+uint8_t  mwbDataGroup = 0;       // Block, zu dem mwbData gehört
+bool     mwbError     = false;
+
+// Wird die MWB-Seite gerade abgefragt?
+bool mwbActive() {
+  return webMwbGroup > 0 &&
+         lastMwbRequest != 0 &&
+         (millis() - lastMwbRequest) < 3000;
+}
+
+String jsonEscape(const String &s) {
+  String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if ((uint8_t)c < 0x20) { o += '?'; }
+    else o += c;   // UTF-8 (Umlaute, °) bleibt erhalten
+  }
+  return o;
+}
+
+// =====================================================
+// MWB-TABELLE: TDI-Motoren ab 05/1999 (T4-Wiki)
+// =====================================================
+
+struct MwbField {
+  const char* name;
+  const char* unit;
+  const char* soll;
+};
+
+struct MwbInfo {
+  uint8_t group;
+  const char* title;
+  const char* cond;
+  MwbField f[4];
+};
+
+const MwbInfo MWB_TABLE[] = {
+  {1, "Einspritzmenge", "Leerlauf, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "740 - 800"},
+    {"Einspritzmenge", "mg/H", "2,2 - 9"},
+    {"Spannung Geber Regelschieberweg G149", "V", "1,25 - 2,00"},
+    {"Kühlmitteltemperatur", "°C", "80 - 110"}}},
+
+  {2, "Leerlaufdrehzahl", "Leerlauf, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "740 - 800"},
+    {"Gaspedalstellung", "%", "0 - 100 (0 = nicht betätigt)"},
+    {"Betriebszustand", "-", "010 = Klima aus + Gaspedal nicht betätigt, 101 = Klima ein"},
+    {"Kühlmitteltemperatur", "°C", "80 - 110"}}},
+
+  {3, "Abgasrückführung", "Leerlauf, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "740 - 800"},
+    {"Luftmasse (Soll)", "mg/H", "-"},
+    {"Luftmasse (Ist)", "mg/H", "-"},
+    {"Tastverhältnis Ventil AGR N18", "%", "-"}}},
+
+  {4, "Einspritzbeginn", "Leerlauf bzw. Volllastfahrt, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "Leerlauf: 740 - 800 | Volllast: 2900 - 3100"},
+    {"Einspritzbeginn (Soll)", "° vor/nach OT", "Leerlauf: 3,8 vor - 0,5 nach OT | Volllast: 9 - 14 vor OT"},
+    {"Einspritzbeginn (Ist)", "° vor/nach OT", "Leerlauf: 3,8 vor - 0,5 nach OT | Volllast: ca. Sollwert"},
+    {"Tastverhältnis Ventil Spritzbeginn N108", "%", "15 - 95"}}},
+
+  {5, "Startverhältnisse", "", {
+    {"Motordrehzahl", "U/min", "-"},
+    {"Startmenge", "mg/H", "-"},
+    {"Einspritzbeginn (Ist)", "° vor/nach OT", "-"},
+    {"Kühlmitteltemperatur", "°C", "-"}}},
+
+  {6, "Schalterstellungen", "Leerlauf, Kühlmittel > 80°C", {
+    {"Geschwindigkeit", "km/h", "0"},
+    {"Bremspedalüberwachung", "xxx", "000 = Leerlauf, 011 = Bremspedal betätigt, 100 = nur Kupplungspedal betätigt"},
+    {"Geschwindigkeitsregelanlage", "xxxxxx", "siehe Artikel GRA"},
+    {"Geschwindigkeitsregelanlage", "x", "000: GRA aus, 001: GRA ein, 255: nicht freigeschaltet"}}},
+
+  {7, "Temperaturen", "Zündung aus, Motor abgekühlt", {
+    {"Kraftstofftemperatur", "°C", "Umgebungstemperatur (-5,6°C bei Defekt)"},
+    {"-", "-", "-"},
+    {"Saugrohrtemperatur", "°C", "Umgebungstemperatur (134,9°C bei Defekt)"},
+    {"Kühlmitteltemperatur", "°C", "Umgebungstemperatur"}}},
+
+  {8, "Einspritzmengenbegrenzung", "Volllastfahrt, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "2900 - 3100"},
+    {"Einspritzmenge (Fahrerwunsch)", "mg/H", "40 - 45"},
+    {"Begrenzung Drehmoment-Kennfeld", "mg/H", "30 - 36"},
+    {"Begrenzung Rauch-Kennfeld", "mg/H", "35 - 41"}}},
+
+  {9, "Einspritzmengenbegrenzung", "", {
+    {"Motordrehzahl", "U/min", "-"},
+    {"Einspritzmenge (GRA aktiv)", "mg/H", "-"},
+    {"Begrenzung Drehmoment Automatikgetriebe", "mg/H", "-"},
+    {"Spannung Geber Regelschieberweg G149", "%", "-"}}},
+
+  {10, "Luftgrößen", "Volllastfahrt, Kühlmittel > 80°C", {
+    {"Luftmasse (Ist)", "mg/H", "800 - 950"},
+    {"Atmosphärischer Druck", "mbar", "-"},
+    {"Saugrohrdruck (Ladedruck)", "mbar", "1700 - 1950"},
+    {"Gaspedalstellung", "%", "100"}}},
+
+  {11, "Ladedruckregelung", "Volllastfahrt, Kühlmittel > 80°C", {
+    {"Motordrehzahl", "U/min", "2900 - 3100"},
+    {"Ladedruck (Soll)", "mbar", "1700 - 1950"},
+    {"Ladedruck (Ist)", "mbar", "1700 - 1950"},
+    {"Tastverhältnis Ventil Ladedruckbegrenzung N75", "%", "9 - 90"}}},
+
+  {12, "Vorglühanlage", "", {
+    {"-", "-", "-"},
+    {"Vorglühzeit", "s", "-"},
+    {"Versorgungsspannung vom Steuergerät", "V", "-"},
+    {"Kühlmitteltemperatur", "°C", "-"}}},
+
+  {13, "Leerlaufruheregelung", "Leerlauf, Kühlmittel > 80°C", {
+    {"Abweichende Einspritzmenge Zyl. 1 zu Zyl. 3", "mg/H", "+/- 2,0"},
+    {"Abweichende Einspritzmenge Zyl. 2 zu Zyl. 3", "mg/H", "+/- 2,0"},
+    {"Abweichende Einspritzmenge Zyl. 4 zu Zyl. 3", "mg/H", "+/- 2,0"},
+    {"Abweichende Einspritzmenge Zyl. 5 zu Zyl. 3", "mg/H", "+/- 2,0"}}},
+
+
+
+  {18, "Schalterstellungen", "", {
+    {"Geschwindigkeit", "km/h", "-"},
+    {"Status GRA, Geschwindigkeitsmesser oder Fahrtschreiber", "xx", "-"},
+    {"-", "-", "-"},
+    {"-", "-", "-"}}},
+
+  {19, "Mengenstellwerk", "Motor aus, Zündung ein", {
+    {"Spannung G149 (Stop-Anschlag)", "V", "0,540 - 0,880"},
+    {"Spannung G149 (Start-Anschlag)", "V", "4,100 - 4,880"},
+    {"-", "-", "-"},
+    {"-", "-", "-"}}},
+
+  {125, "Datenbus", "Leerlauf", {
+    {"Status Automatikgetriebe", "-", "1 = Verbindung"},
+    {"Status ABS", "-", "1 = Verbindung"},
+    {"Status Kombiinstrument", "-", "1 = Verbindung"},
+    {"Status Airbag", "-", "1 = Verbindung"}}},
+};
+
+const int MWB_TABLE_SIZE = sizeof(MWB_TABLE) / sizeof(MWB_TABLE[0]);
+
+// Index in MWB_TABLE oder -1, wenn der Block nicht in der Tabelle steht
+int findMwbIndex(uint8_t group) {
+  for (int i = 0; i < MWB_TABLE_SIZE; i++) {
+    if (MWB_TABLE[i].group == group) return i;
+  }
+  return -1;
+}
 
 // =====================================================
 // FUNKTIONSPROTOTYPEN
@@ -2320,7 +2477,21 @@ void updateMeasurements() {
   // MWB 001 Feld 1+2, MWB 011 Feld 3
   // ================================================
 
-  if (webActive) {
+  if (webActive && mwbActive()) {
+    // MWB-Seite offen: nur den gewählten Block lesen
+    uint8_t n = 0;
+    readOk = readMeasurementGroup(webMwbGroup, mwbData, n, false);
+    if (readOk) {
+      mwbCount = n;
+      mwbDataGroup = webMwbGroup;
+      mwbError = false;
+    } else {
+      mwbCount = 0;
+      mwbError = true;
+    }
+  }
+
+  else if (webActive) {
     KwpValue g1[KWP_MAX_FIELDS];
     uint8_t n = 0;
 
@@ -2454,6 +2625,7 @@ header{padding:14px 16px;font-size:20px;font-weight:600;display:flex;justify-con
   <div class="card"><div class="lbl">Einspritzmenge</div><div class="val" id="inj">-</div><div class="unit">mg/Hub</div></div>
   <div class="card"><div class="lbl">Spannung</div><div class="val" id="volt">-</div><div class="unit">V</div></div>
 </div>
+<div style="padding:0 12px 16px"><a href="/mwb" style="color:#6cf;text-decoration:none">Messwerteblöcke →</a></div>
 <script>
 const st = document.getElementById('st');
 
@@ -2514,6 +2686,185 @@ void handleApiLive() {
   server.send(200, "application/json", json);
 }
 
+const char MWB_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Messwerteblock</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#eee}
+header{padding:14px 16px;font-size:20px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+a{color:#6cf;text-decoration:none;font-size:14px}
+#st{font-size:13px;padding:4px 10px;border-radius:12px;background:#555}
+#st.ok{background:#1b7f3a}
+#st.err{background:#a12a2a}
+.sel{display:flex;gap:8px;padding:0 12px 12px;align-items:center}
+.sel button{background:#2a2a2a;color:#eee;border:0;border-radius:10px;font-size:22px;width:52px;height:48px}
+.sel input{flex:1;min-width:0;background:#1e1e1e;color:#eee;border:1px solid #333;border-radius:10px;font-size:22px;height:48px;text-align:center}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}
+.card{background:#1e1e1e;border-radius:12px;padding:16px;text-align:center}
+.lbl{font-size:13px;color:#999}
+.val{font-size:30px;font-weight:700;margin:6px 0 2px;word-break:break-all}
+.unit{font-size:13px;color:#999}
+.raw{font-size:11px;color:#666;margin-top:6px}
+.soll{font-size:12px;color:#8c8;margin-top:6px}
+#msg{padding:0 16px 12px;color:#999;font-size:14px}
+</style>
+</head>
+<body>
+<header><span>Messwerteblock</span><span id="st">...</span></header>
+<div style="padding:0 16px 12px"><a href="/">&larr; Dashboard</a></div>
+<div class="sel">
+  <button id="prev">&minus;</button>
+  <input id="grp" type="number" min="1" max="255" inputmode="numeric">
+  <button id="next">+</button>
+</div>
+<div id="msg"></div>
+<div class="grid" id="grid"></div>
+<script>
+const st = document.getElementById('st');
+const grp = document.getElementById('grp');
+const grid = document.getElementById('grid');
+const msg = document.getElementById('msg');
+
+let g = parseInt(localStorage.getItem('mwbGroup')) || 1;
+grp.value = g;
+
+function setG(v) {
+  v = Math.max(1, Math.min(255, parseInt(v) || 1));
+  g = v;
+  grp.value = v;
+  localStorage.setItem('mwbGroup', v);
+  grid.innerHTML = '';
+  msg.textContent = 'Lade Block ' + v + '...';
+}
+
+document.getElementById('prev').onclick = () => setG(g - 1);
+document.getElementById('next').onclick = () => setG(g + 1);
+grp.onchange = () => setG(grp.value);
+
+function card(i, f) {
+  const c = document.createElement('div');
+  c.className = 'card';
+  const mk = (cls, txt) => {
+    const e = document.createElement('div');
+    e.className = cls;
+    e.textContent = txt;
+    c.appendChild(e);
+  };
+  const named = f.n && f.n !== '-';
+  mk('lbl', named ? f.n : 'Feld ' + (i + 1));
+  mk('val', f.v);
+  mk('unit', f.u || '\u00a0');
+  mk('raw', 'Feld ' + (i + 1) + '  K=' + f.k + '  a=' + f.a + '  b=' + f.b);
+  return c;
+}
+
+async function upd() {
+  try {
+    const r = await fetch('/api/mwb?group=' + g, { cache: 'no-store' });
+    const d = await r.json();
+
+    st.textContent = d.connected ? 'MSG verbunden' : 'MSG getrennt';
+    st.className = d.connected ? 'ok' : 'err';
+
+    if (d.group === g && d.dataGroup === g && d.fields.length > 0) {
+      grid.innerHTML = '';
+      d.fields.forEach((f, i) => grid.appendChild(card(i, f)));
+      msg.textContent = 'Block ' + g +
+        (d.title ? ' – ' + d.title : '') +
+        (d.cond ? ' (' + d.cond + ')' : '');
+    } else if (d.error && d.group === g) {
+      msg.textContent = 'Block ' + g + ' konnte nicht gelesen werden.';
+    } else if (!d.connected) {
+      msg.textContent = 'Warte auf Verbindung zum MSG...';
+    }
+  } catch (e) {
+    st.textContent = 'ESP offline';
+    st.className = 'err';
+  }
+  setTimeout(upd, 500);
+}
+
+msg.textContent = 'Lade Block ' + g + '...';
+upd();
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleMwbPage() {
+  lastWebRequest = millis();
+  server.send(200, "text/html", MWB_HTML);
+}
+
+void handleApiMwb() {
+  lastWebRequest = millis();
+  lastMwbRequest = millis();
+
+  if (server.hasArg("group")) {
+    int g = server.arg("group").toInt();
+    if (g >= 1 && g <= 255 && g != webMwbGroup) {
+      webMwbGroup = (uint8_t)g;
+      mwbCount = 0;
+      mwbDataGroup = 0;
+      mwbError = false;
+    }
+  }
+
+  int idx = findMwbIndex(webMwbGroup);
+
+  String json = "{\"connected\":";
+  json += kwpConnected ? "true" : "false";
+  json += ",\"group\":";
+  json += String(webMwbGroup);
+  json += ",\"dataGroup\":";
+  json += String(mwbDataGroup);
+  json += ",\"error\":";
+  json += mwbError ? "true" : "false";
+  json += ",\"title\":\"";
+  json += idx >= 0 ? jsonEscape(String(MWB_TABLE[idx].title)) : String("");
+  json += "\",\"cond\":\"";
+  json += idx >= 0 ? jsonEscape(String(MWB_TABLE[idx].cond)) : String("");
+  json += "\",\"fields\":[";
+
+  for (uint8_t i = 0; i < mwbCount; i++) {
+    if (i > 0) json += ",";
+
+    String val = mwbData[i].isText
+                   ? mwbData[i].text
+                   : String(mwbData[i].value, 2);
+
+    String name = "";
+    String unit = mwbData[i].unit;
+
+    if (idx >= 0 && i < 4) {
+      name = MWB_TABLE[idx].f[i].name;
+
+      // Einheit aus der Tabelle, falls die Formel keine liefert
+      if (unit == "" || unit == "?") {
+        unit = MWB_TABLE[idx].f[i].unit;
+        if (unit == "-") unit = "";
+      }
+    }
+
+    json += "{\"k\":";  json += String(mwbData[i].formula);
+    json += ",\"a\":";  json += String(mwbData[i].a);
+    json += ",\"b\":";  json += String(mwbData[i].b);
+    json += ",\"v\":\""; json += jsonEscape(val);
+    json += "\",\"u\":\""; json += jsonEscape(unit);
+    json += "\",\"n\":\""; json += jsonEscape(name);
+    json += "\"}";
+  }
+
+  json += "]}";
+
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
 // =====================================================
 // SETUP
 // =====================================================
@@ -2565,6 +2916,8 @@ pinMode(BUTTON_INPUT, INPUT_PULLUP);
 
   server.on("/", handleRoot);
   server.on("/api/live", handleApiLive);
+  server.on("/mwb", handleMwbPage);
+  server.on("/api/mwb", handleApiMwb);
   server.begin();
 
   Serial.print("Hotspot gestartet, IP: ");
