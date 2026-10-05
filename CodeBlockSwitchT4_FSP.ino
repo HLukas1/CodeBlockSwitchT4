@@ -160,7 +160,8 @@ const uint32_t BUTTON_DEBOUNCE_MS = 40;
 uint32_t lastMeasurementTime = 0;
 const uint32_t MEASUREMENT_INTERVAL_MS = 500;
 
-
+uint32_t lastConnectAttempt = 0;
+const uint32_t RECONNECT_PAUSE_MS = 15000;
 // BETRIEBSMODI
 
 enum DisplayMode {
@@ -345,12 +346,12 @@ const FaultInfo FAULT_TABLE[] = {
 
 const int FAULT_TABLE_SIZE = sizeof(FAULT_TABLE) / sizeof(FAULT_TABLE[0]);
 
-// Liefert Zeiger auf Tabelleneintrag oder nullptr
-const FaultInfo* findFaultInfo(uint16_t code) {
+// Liefert Index in FAULT_TABLE oder -1
+int findFaultIndex(uint16_t code) {
   for (int i = 0; i < FAULT_TABLE_SIZE; i++) {
-    if (FAULT_TABLE[i].code == code) return &FAULT_TABLE[i];
+    if (FAULT_TABLE[i].code == code) return i;
   }
-  return nullptr;
+  return -1;
 }
 
 // Wird die MWB-Seite gerade abgefragt?
@@ -538,7 +539,7 @@ bool parseCodingBlock(
 bool readIdentificationBlocks();
 
 bool connectMSGOnce();
-bool connectMSG();
+bool connectMSG(uint8_t maxAttempts = MAX_CONNECT_ATTEMPTS);
 void disconnectMSG();
 
 bool sendCoding(
@@ -1351,7 +1352,7 @@ bool connectMSGOnce() {
 // VERBINDEN MIT WIEDERHOLUNG
 // =====================================================
 
-bool connectMSG() {
+bool connectMSG(uint8_t maxAttempts) { 
 
 #if TESTBENCH_MODE
   kwpConnected = true;
@@ -1369,13 +1370,13 @@ bool connectMSG() {
   }
   for (
     uint8_t attempt = 1;
-    attempt <= MAX_CONNECT_ATTEMPTS;
+    attempt <= maxAttempts;
     attempt++) {
     Serial.println();
     Serial.print("Verbindungsversuch ");
     Serial.print(attempt);
     Serial.print(" von ");
-    Serial.println(MAX_CONNECT_ATTEMPTS);
+    Serial.println(maxAttempts);   
 
     if (connectMSGOnce()) {
       Serial.println();
@@ -2376,11 +2377,20 @@ void enterCodeblockMode() {
   // Verbindung herstellen
   // -------------------------------------------------
 
-  if (!connectMSG()) {
-    oledShowError();
-    return;
-  }
+  // Verbindung herstellen (nur 1 Versuch, dann Pause)
+  if (!kwpConnected) {
+    if (lastConnectAttempt != 0 &&
+        millis() - lastConnectAttempt < RECONNECT_PAUSE_MS) {
+      return;
+    }
 
+    bool ok = connectMSG(1);
+    lastConnectAttempt = millis();
+
+    if (!ok) {
+      return;
+    }
+  }
   // -------------------------------------------------
   // Aktuelle Codierung übernehmen
   // -------------------------------------------------
@@ -2937,7 +2947,7 @@ void processFaultRequest() {
 
   bool result = false;
 
-  if (connectMSG()) {
+  if (connectMSG(startupFaultCheck ? 1 : MAX_CONNECT_ATTEMPTS)) {
     result = (request == FAULT_REQUEST_READ)
                ? readFaultMemory()
                : clearFaultMemory();
@@ -3504,16 +3514,16 @@ void handleApiFaults() {
     json += jsonEscape(faultTypeText(faultData[i].type));
     json += "\"";
 
-    const FaultInfo* info = findFaultInfo(faultData[i].code);
+    int fi = findFaultIndex(faultData[i].code);
 
     json += ",\"known\":";
-    json += info ? "true" : "false";
+    json += (fi >= 0) ? "true" : "false";
 
-    if (info) {
-      json += ",\"obd\":\"";    json += jsonEscape(String(info->obd));
-      json += "\",\"title\":\""; json += jsonEscape(String(info->text));
-      json += "\",\"cause\":\""; json += jsonEscape(String(info->cause));
-      json += "\",\"effect\":\""; json += jsonEscape(String(info->effect));
+    if (fi >= 0) {
+      json += ",\"obd\":\"";    json += jsonEscape(String(FAULT_TABLE[fi].obd));
+      json += "\",\"title\":\""; json += jsonEscape(String(FAULT_TABLE[fi].text));
+      json += "\",\"cause\":\""; json += jsonEscape(String(FAULT_TABLE[fi].cause));
+      json += "\",\"effect\":\""; json += jsonEscape(String(FAULT_TABLE[fi].effect));
       json += "\"";
     }
 
