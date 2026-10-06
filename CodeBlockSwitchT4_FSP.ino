@@ -98,8 +98,29 @@ float injectionActual = 0.0;
 float currentSpeed = 0.0;
 float fuelConsumption = 0.0;
 
+// =====================================================
+// FAHRT-DURCHSCHNITT (nur RAM -> nach Neustart 0)
+// =====================================================
+
+float averageFuelConsumption = 0.0;
+
+double tripFuelLiters = 0.0;
+double tripDistanceKm = 0.0;
+
+uint32_t lastAverageUpdateTime = 0;
+uint32_t lastAverageMeasurementTime = 0;
+
+// Durchschnitt alle 2 s aktualisieren
+const uint32_t AVERAGE_MEASUREMENT_INTERVAL_MS = 2000;
+
+// Unter dieser Geschwindigkeit nicht mitzählen (Standzeit)
+const float FUEL_MIN_SPEED_KMH = 4.0f;
+
+// Durchschnitt erst ab 100 m Fahrstrecke anzeigen
+const double AVERAGE_MIN_DISTANCE_KM = 0.10;
+
 // Glaettung Verbrauch (gleitender Mittelwert)
-const uint8_t FUEL_AVG_SAMPLES = 10;
+const uint8_t FUEL_AVG_SAMPLES = 35;
 
 float fuelHourBuf[FUEL_AVG_SAMPLES] = {0};
 float speedBuf[FUEL_AVG_SAMPLES] = {0};
@@ -168,6 +189,7 @@ enum DisplayMode {
   MODE_VOLTAGE,
   MODE_BOOST,
   MODE_CONSUMPTION,
+  MODE_AVERAGE_CONSUMPTION,
   MODE_RPM,
   MODE_INJECTION,
   MODE_CODEBLOCK
@@ -564,6 +586,9 @@ bool readMeasurement(
 bool faultPageActive();
 
 void calculateFuelConsumption();
+float calculateLitersPerHour(uint16_t rpm, float injection);
+void updateAverageFuelConsumption(float litersPerHour, float speedKmh);
+bool readTripAverageValues();
 
 bool readFaultMemory();
 bool clearFaultMemory();
@@ -2002,42 +2027,67 @@ bool readMeasurement(
 
 
 
-void calculateFuelConsumption() {
+// =====================================================
+// KRAFTSTOFF PRO STUNDE (L/h)
+// 5-Zylinder, 4-Takt: 2,5 Einspritzungen pro Umdrehung
+// Dieseldichte ca. 0,832 kg/L
+// =====================================================
 
-  // 5-Zylinder, 4-Takt:
-  // 5 Einspritzungen pro 2 Kurbelwellenumdrehungen
+float calculateLitersPerHour(uint16_t rpm, float injection) {
   const float INJECTIONS_PER_REV = 2.5f;
-
-  // Dieseldichte ca. 0.832 kg/L
   const float DIESEL_DENSITY_MG_PER_L = 832000.0f;
 
-  // -------------------------------------------------
-  // VERBRAUCH PRO STUNDE (L/h)
-  // -------------------------------------------------
-
   float mgPerMinute =
-    injectionActual *
-    (float)lastRpm *
-    INJECTIONS_PER_REV;
+    injection * (float)rpm * INJECTIONS_PER_REV;
+
+  return (mgPerMinute / DIESEL_DENSITY_MG_PER_L) * 60.0f;
+}
+
+void calculateFuelConsumption() {
 
   float litersPerHour =
-    (mgPerMinute / DIESEL_DENSITY_MG_PER_L) * 60.0f;
+    calculateLitersPerHour(lastRpm, injectionActual);
 
   // -------------------------------------------------
-  // IN RINGPUFFER SCHREIBEN
+  // BEI FAHRZEUGSTILLSTAND ZURUECKSETZEN
+  // Wichtig: vor dem Eintragen in den Puffer prüfen.
+  // -------------------------------------------------
+
+  if (currentSpeed < 4.0f) {
+
+    fuelConsumption = 0.0f;
+
+    for (uint8_t i = 0; i < FUEL_AVG_SAMPLES; i++) {
+      fuelHourBuf[i] = 0.0f;
+      speedBuf[i] = 0.0f;
+    }
+
+    fuelBufCount = 0;
+    fuelBufIndex = 0;
+
+    Serial.print("Verbrauch: ");
+    Serial.print(litersPerHour, 2);
+    Serial.println(" L/h roh | 0.0 L/100km, Fahrzeug steht");
+
+    return;
+  }
+
+  // -------------------------------------------------
+  // AKTUELLEN WERT IN DEN RINGPUFFER SCHREIBEN
   // -------------------------------------------------
 
   fuelHourBuf[fuelBufIndex] = litersPerHour;
   speedBuf[fuelBufIndex] = currentSpeed;
 
-  fuelBufIndex = (fuelBufIndex + 1) % FUEL_AVG_SAMPLES;
+  fuelBufIndex =
+    (fuelBufIndex + 1) % FUEL_AVG_SAMPLES;
 
   if (fuelBufCount < FUEL_AVG_SAMPLES) {
     fuelBufCount++;
   }
 
   // -------------------------------------------------
-  // MITTELWERTE (L/h und km/h getrennt)
+  // MITTELWERTE BILDEN
   // -------------------------------------------------
 
   float sumFuel = 0.0f;
@@ -2048,43 +2098,129 @@ void calculateFuelConsumption() {
     sumSpeed += speedBuf[i];
   }
 
-  float avgFuelHour = sumFuel / fuelBufCount;
-  float avgSpeed = sumSpeed / fuelBufCount;
+  float avgFuelHour =
+    sumFuel / (float)fuelBufCount;
+
+  float avgSpeed =
+    sumSpeed / (float)fuelBufCount;
 
   // -------------------------------------------------
-  // STAND -> 0.0 (keine Division durch 0)
+  // VERBRAUCH BERECHNEN
+  //
+  // Unter 10 km/h Durchschnittsgeschwindigkeit wird
+  // 0.0 angezeigt, damit beim Losfahren keine Werte
+  // wie 50 bis 70 L/100km auftreten.
   // -------------------------------------------------
 
-if (currentSpeed < 4.0f) {
+  if (avgSpeed < 10.0f) {
 
     fuelConsumption = 0.0f;
 
-    // Puffer zurücksetzen
-    for (uint8_t i = 0; i < FUEL_AVG_SAMPLES; i++) {
-        fuelHourBuf[i] = 0.0f;
-        speedBuf[i] = 0.0f;
-    }
+  } else {
 
-    fuelBufCount = 0;
-    fuelBufIndex = 0;
-}
-
-  // -------------------------------------------------
-  // GEGLAETTETER VERBRAUCH L/100km
-  // -------------------------------------------------
-
-  else {
-    fuelConsumption = avgFuelHour * 100.0f / avgSpeed;
+    fuelConsumption =
+      avgFuelHour * 100.0f / avgSpeed;
   }
+
+  // -------------------------------------------------
+  // SERIELLE AUSGABE
+  // -------------------------------------------------
 
   Serial.print("Verbrauch: ");
   Serial.print(litersPerHour, 2);
-  Serial.print(" L/h roh  |  ");
+  Serial.print(" L/h roh | ");
+
   Serial.print(fuelConsumption, 1);
-  Serial.println(" L/100km geglaettet");
+  Serial.print(" L/100km geglaettet | ");
+
+  Serial.print("Geschwindigkeit aktuell: ");
+  Serial.print(currentSpeed, 1);
+  Serial.print(" km/h | Mittel: ");
+  Serial.print(avgSpeed, 1);
+  Serial.println(" km/h");
 }
 
+// =====================================================
+// FAHRT-DURCHSCHNITT AUFSUMMIEREN
+//
+// Durchschnitt = Gesamtliter / Gesamtkilometer * 100
+// Standzeiten (< 4 km/h) werden nicht gezählt.
+// =====================================================
 
+void updateAverageFuelConsumption(float litersPerHour, float speedKmh) {
+
+  uint32_t now = millis();
+
+  // Erster Aufruf oder nach Pause: nur Zeitstempel setzen
+  if (lastAverageUpdateTime == 0) {
+    lastAverageUpdateTime = now;
+    return;
+  }
+
+  uint32_t elapsedMs = now - lastAverageUpdateTime;
+  lastAverageUpdateTime = now;
+
+  // Lücken > 10 s ignorieren (Spannungsmodus, Fehlerspeicher,
+  // Verbindungsabbruch) -> keine Sprünge
+  if (elapsedMs == 0 || elapsedMs > 10000UL) {
+    return;
+  }
+
+  // Standzeit nicht berücksichtigen
+  if (speedKmh < FUEL_MIN_SPEED_KMH || litersPerHour < 0.0f) {
+    return;
+  }
+
+  double hours = (double)elapsedMs / 3600000.0;
+
+  tripFuelLiters += (double)litersPerHour * hours;
+  tripDistanceKm += (double)speedKmh * hours;
+
+  if (tripDistanceKm >= AVERAGE_MIN_DISTANCE_KM) {
+    averageFuelConsumption =
+      (float)(tripFuelLiters * 100.0 / tripDistanceKm);
+  }
+
+  Serial.print("Fahrt: ");
+  Serial.print(tripDistanceKm, 3);
+  Serial.print(" km | ");
+  Serial.print(tripFuelLiters, 4);
+  Serial.print(" L | AVG ");
+  Serial.print(averageFuelConsumption, 1);
+  Serial.println(" L/100km");
+}
+
+// =====================================================
+// MWB 1 + MWB 6 FÜR DEN DURCHSCHNITT LESEN
+// (wird in Modi ohne Verbrauchsanzeige alle 2 s genutzt)
+// =====================================================
+
+bool readTripAverageValues() {
+  KwpValue g1[KWP_MAX_FIELDS];
+  uint8_t n = 0;
+  KwpValue speedValue;
+
+  if (!readMeasurementGroup(1, g1, n, false) || n < 2) {
+    return false;
+  }
+
+  uint16_t rpm = (uint16_t)g1[0].value;
+  float injection = (float)g1[1].value;
+
+  if (!readMeasurement(6, 1, speedValue, false)) {
+    return false;
+  }
+
+  // Frische Werte gleich mit übernehmen
+  lastRpm = rpm;
+  injectionActual = injection;
+
+  updateAverageFuelConsumption(
+    calculateLitersPerHour(rpm, injection),
+    (float)speedValue.value);
+
+  return true;
+}
 
 // =====================================================
 // OLED - NORMALE MESSWERTANZEIGE
@@ -2112,6 +2248,8 @@ void oledShowNormal() {
     oledShowValue(String(lastBoostMbar), "mBar");
   } else if (displayMode == MODE_CONSUMPTION) {
     oledShowValue(String(fuelConsumption, 1), "L/100km");
+  } else if (displayMode == MODE_AVERAGE_CONSUMPTION) {
+    oledShowValue(String(averageFuelConsumption, 1), "AVG L/100");
   } else if (displayMode == MODE_INJECTION) {
     oledShowValue(String(injectionActual, 1), "mg/Hub");
   }
@@ -2319,7 +2457,7 @@ void updateVoltageDisplay() {
 
     String warn = "! " + String(faultCount) + " FSP";
 
-    display.setCursor(getCenteredX(warn), 12);
+    display.setCursor(getCenteredX(warn), 22);
     display.print(warn);
   }
 
@@ -2696,6 +2834,12 @@ void handleButton() {
 
   } else if (displayMode == MODE_CONSUMPTION) {
 
+    displayMode = MODE_AVERAGE_CONSUMPTION;
+    Serial.println("MODE: DURCHSCHNITTSVERBRAUCH");
+    oledShowNormal();
+
+  } else if (displayMode == MODE_AVERAGE_CONSUMPTION) {
+
     displayMode = MODE_INJECTION;
     Serial.println("MODE: EINSPRITZMENGE");
     oledShowNormal();
@@ -2780,13 +2924,22 @@ void updateMeasurements() {
     measureVoltage();
   }
 
-  // Verbindung herstellen
+  // Verbindung herstellen (1 Versuch, danach 15 s Pause)
   if (!kwpConnected) {
-    if (!connectMSG()) {
+    if (lastConnectAttempt != 0 &&
+        millis() - lastConnectAttempt < RECONNECT_PAUSE_MS) {
       return;
     }
-  }
 
+    lastConnectAttempt = millis();
+
+    if (!connectMSG(1)) {
+      return;
+    }
+
+    // Verbindung erfolgreich -> beim nächsten Abbruch sofort neu versuchen
+    lastConnectAttempt = 0;
+  }
   // =====================================================
   // MESSWERT LESEN
   // =====================================================
@@ -2842,6 +2995,11 @@ void updateMeasurements() {
         if (readOk) {
           currentSpeed = (float)v.value;
           calculateFuelConsumption();
+
+          updateAverageFuelConsumption(
+            calculateLitersPerHour(lastRpm, injectionActual),
+            currentSpeed);
+          lastAverageMeasurementTime = millis();
         }
       }
     }
@@ -2859,7 +3017,7 @@ void updateMeasurements() {
   }
 
   // ================================================
-  // LADEDRUCK -> MWB 011 Feld 3
+  //   -> MWB 011 Feld 3
   // ================================================
 
   else if (displayMode == MODE_BOOST) {
@@ -2884,9 +3042,26 @@ void updateMeasurements() {
       if (readMeasurement(6, 1, v, false)) {
         currentSpeed = (float)v.value;
         calculateFuelConsumption();
+
+        updateAverageFuelConsumption(
+          calculateLitersPerHour(lastRpm, injectionActual),
+          currentSpeed);
+        lastAverageMeasurementTime = millis();
+
         readOk = true;
       }
     }
+  }
+
+  // ================================================
+  // DURCHSCHNITT -> Werte kommen aus Block 8d
+  // ================================================
+
+  else if (displayMode == MODE_AVERAGE_CONSUMPTION) {
+    // Jeden Zyklus lesen -> Verbindung bleibt aktiv
+    // und der Durchschnitt wird genauer
+    readOk = readTripAverageValues();
+    lastAverageMeasurementTime = millis();
   }
 
   // ================================================
@@ -2897,6 +3072,26 @@ void updateMeasurements() {
     readOk = readMeasurement(1, 2, v, false);
     if (readOk) {
       injectionActual = (float)v.value;
+    }
+  }
+
+  // ================================================
+  // FAHRT-DURCHSCHNITT IN ALLEN ANDEREN MODI
+  // Alle 2 s MWB 1 + MWB 6 zusätzlich lesen.
+  // Nicht, wenn die freie MWB-Webseite offen ist.
+  // Im Durchschnittsmodus selbst läuft es ebenfalls hierüber.
+  // ================================================
+
+  if (readOk &&
+      !mwbActive() &&
+      millis() - lastAverageMeasurementTime >=
+        AVERAGE_MEASUREMENT_INTERVAL_MS) {
+
+    lastAverageMeasurementTime = millis();
+
+    if (!readTripAverageValues()) {
+      // Verbindung vermutlich gestört -> wie gewohnt zurücksetzen
+      readOk = false;
     }
   }
 
