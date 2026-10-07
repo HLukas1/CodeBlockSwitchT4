@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="200" font-family="monospace">
+<rect width="900" height="200" fill="#fff"/>
+<g fill="#000"><rect x="10" y="40" width="128" height="96"/><rect x="160" y="40" width="128" height="96"/><rect x="310" y="40" width="128" height="96"/><rect x="460" y="40" width="128" height="96"/><rect x="610" y="40" width="128" height="96"/><rect x="760" y="40" width="128" height="96"/></g>
+<g fill="#9cf" text-anchor="middle">
+<text x="74" y="72" font-size="12">! 2 FSP</text><text x="74" y="110" font-size="22">12.6 V</text>
+<text x="224" y="95" font-size="24">850</text><text x="224" y="125" font-size="12">U/min</text>
+<text x="374" y="95" font-size="24">1020</text><text x="374" y="125" font-size="12">mBar</text>
+<text x="524" y="95" font-size="24">6.4</text><text x="524" y="125" font-size="12">L/100km</text>
+<text x="674" y="95" font-size="24">88.0</text><text x="674" y="125" font-size="12">C ★</text>
+<text x="824" y="62" font-size="12">CB: 2</text><text x="824" y="105" font-size="22">102PS</text></g>
+<g font-size="13" font-family="Arial" text-anchor="middle"><text x="74" y="25">Spannung</text><text x="224" y="25">Drehzahl</text><text x="374" y="25">Ladedruck</text><text x="524" y="25">Verbrauch</text><text x="674" y="25">Eigener MW</text><text x="824" y="25">Codeblock</text></g>
+<text x="450" y="180" font-family="Arial" font-size="13" text-anchor="middle">Kurz drücken: nächster Bildschirm · Lang (≥3 s) im Codeblock: 2 ↔ 3</text>
+</svg>
