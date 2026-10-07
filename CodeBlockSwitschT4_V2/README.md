@@ -2,7 +2,7 @@
 
 Ein kompaktes Anzeige- und Diagnosegerät für VAG-Fahrzeuge mit K-Line (KWP1281). Es liest Messwerte aus dem Motorsteuergerät (MSG), zeigt sie auf einem 64×48-OLED an und stellt über einen eigenen WLAN-Hotspot ein Web-Dashboard für das Handy bereit.
 
-![Schaltplan](images/schaltplan.svg)
+![Schaltplan](CodeBlockSwitchT4_V2/images/schaltplan.svg)
 
 ---
 
