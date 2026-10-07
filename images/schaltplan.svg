@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" font-family="Arial" font-size="14">
+<rect width="1000" height="620" fill="#fff"/>
+<text x="20" y="30" font-size="20" font-weight="bold">TDI-Dashboard – Schaltplan</text>
+<!-- OBD -->
+<rect x="20" y="80" width="170" height="200" fill="#eee" stroke="#000"/><text x="40" y="105" font-weight="bold">OBD-II Buchse</text>
+<text x="30" y="150">Pin 16  +12 V</text><text x="30" y="200">Pin 7   K-Line</text><text x="30" y="250">Pin 4/5 GND</text>
+<!-- Buck -->
+<rect x="260" y="60" width="160" height="80" fill="#ffe9b3" stroke="#000"/><text x="275" y="90" font-weight="bold">Step-Down</text><text x="275" y="115">12 V → 5 V</text>
+<line x1="190" y1="145" x2="260" y2="100" stroke="red" stroke-width="2"/>
+<!-- L9637D -->
+<rect x="260" y="200" width="170" height="200" fill="#d6e8ff" stroke="#000"/><text x="300" y="225" font-weight="bold">L9637D</text>
+<text x="270" y="255">6 VS</text><text x="270" y="290">5 K</text><text x="270" y="325">4 GND</text>
+<text x="370" y="255">3 VCC</text><text x="375" y="290">8 TX</text><text x="375" y="325">1 RX</text><text x="270" y="385" font-size="12">2 LI / 7 LO frei</text>
+<line x1="190" y1="195" x2="260" y2="285" stroke="#06c" stroke-width="2"/>
+<line x1="190" y1="145" x2="250" y2="250" stroke="red" stroke-width="2"/><line x1="250" y1="250" x2="260" y2="250" stroke="red" stroke-width="2"/>
+<text x="195" y="300" font-size="12">510 Ω K→+12 V</text>
+<!-- ESP -->
+<rect x="560" y="60" width="200" height="420" fill="#d9f2d9" stroke="#000"/><text x="580" y="90" font-weight="bold">ESP32-C3 SuperMini</text>
+<text x="570" y="125">5V</text><text x="570" y="160">3V3</text><text x="570" y="195">GND</text>
+<text x="570" y="250">GPIO10 (K TX)</text><text x="570" y="285">GPIO1  (K RX)</text>
+<text x="570" y="330">GPIO6  (SDA)</text><text x="570" y="365">GPIO7  (SCL)</text>
+<text x="570" y="410">GPIO9  (Taster)</text><text x="570" y="440">GPIO5  (Taster LOW)</text><text x="570" y="470">GPIO0  (Spannung)</text>
+<line x1="420" y1="100" x2="560" y2="120" stroke="red" stroke-width="2"/>
+<line x1="430" y1="250" x2="560" y2="155" stroke="#c60" stroke-width="2"/>
+<line x1="430" y1="285" x2="560" y2="245" stroke="#06c" stroke-width="2"/>
+<line x1="430" y1="320" x2="560" y2="280" stroke="#06c" stroke-width="2"/>
+<!-- OLED -->
+<rect x="820" y="300" width="160" height="90" fill="#222" stroke="#000"/><text x="835" y="330" fill="#fff" font-weight="bold">OLED 64×48</text><text x="835" y="355" fill="#fff">SSD1306 0x3C</text><text x="835" y="378" fill="#fff" font-size="12">VCC 3V3 / GND</text>
+<line x1="760" y1="325" x2="820" y2="330" stroke="#090" stroke-width="2"/><line x1="760" y1="360" x2="820" y2="360" stroke="#090" stroke-width="2"/>
+<!-- Button -->
+<rect x="820" y="410" width="120" height="50" fill="#fdd" stroke="#000"/><text x="845" y="440">Taster</text>
+<line x1="760" y1="405" x2="820" y2="425" stroke="#000" stroke-width="2"/><line x1="760" y1="435" x2="820" y2="445" stroke="#000" stroke-width="2"/>
+<!-- Divider -->
+<rect x="560" y="520" width="420" height="80" fill="#f3e0ff" stroke="#000"/><text x="575" y="545" font-weight="bold">Spannungsteiler</text>
+<text x="575" y="570">+12 V ── R_TOP ──┬── GPIO0</text><text x="575" y="590">                  └── R_BOTTOM ── GND   (Verhältnis 47 : 10)</text>
+<text x="20" y="600" font-size="12">Alle Massen (OBD, Step-Down, L9637D, ESP, OLED) verbinden.</text>
+</svg>
