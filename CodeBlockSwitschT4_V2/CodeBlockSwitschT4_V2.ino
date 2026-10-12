@@ -60,7 +60,7 @@ uint32_t KLINE_BAUD = 9600;
 const uint32_t FIVE_BAUD_BIT_US = 200000UL;
 
 // Busruhe vor neuer Adressierung
-const uint32_t BUS_IDLE_TIME_MS = 300;
+const uint32_t BUS_IDLE_TIME_MS = 1200;
 
 // Antwortabstand nach empfangenem Byte
 const uint32_t TESTER_RESPONSE_DELAY_MS = 5;
@@ -2185,14 +2185,14 @@ void oledShowWriting() {
 
   display.setTextSize(1);
 
-  display.setCursor(0, 12);
+  display.setCursor(0, 24);
   display.println("CODEBLOCK");
 
-  display.setCursor(0, 23);
+  display.setCursor(0, 30);
   display.println("wird");
 
-  display.setCursor(0, 34);
-  display.println("geschrieben...");
+  display.setCursor(0, 36);
+  display.println("geschrieben");
 
   display.display();
 }
@@ -2567,6 +2567,8 @@ void changeCodeblock() {
     return;
   }
 
+  oledShowWriting();
+
   // =====================================================
   // ZIEL BESTIMMEN
   // =====================================================
@@ -2659,7 +2661,6 @@ void changeCodeblock() {
   // CODEBLOCK SCHREIBEN
   // =====================================================
 
-  oledShowWriting();
 
   bool result = sendCoding(
     newCodeblock,
@@ -3124,6 +3125,9 @@ void updateMeasurements() {
 
     stopKLine(true);
     kwpConnected = false;
+
+    // Nicht sofort neu adressieren, MSG Zeit geben
+    lastConnectAttempt = millis();
 
     return;
   }
@@ -3706,6 +3710,11 @@ void handleApiOledUnit() {
 void setup() {
     // Serieller Monitor für Debug-Ausgaben
   Serial.begin(115200);
+
+#if ARDUINO_USB_CDC_ON_BOOT
+  // Ohne angeschlossenen PC darf Serial die K-Line-Zeiten nicht blockieren
+  Serial.setTxTimeoutMs(0);
+#endif
 
   // Gespeicherte OLED-Konfiguration laden
   loadOledConfig();
