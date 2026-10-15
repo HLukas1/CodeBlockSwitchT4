@@ -131,6 +131,18 @@ uint8_t fuelBufCount = 0;
 
 bool kwpConnected = false;
 
+// Zeitpunkt des letzten vollständig empfangenen Blocks
+uint32_t lastKwpRxTime = 0;
+
+// Spätestens nach dieser Zeit ACK senden (SG-Timeout = 1100 ms)
+const uint32_t KWP_KEEPALIVE_MS = 400;
+
+// true = echter Leitungs-/Protokollfehler (Timeout, falsches Komplement)
+// false = SG hat nur die Anfrage abgelehnt, Verbindung ist noch ok
+bool kwpLinkError = false;
+
+// Hilfsflag für kwpReceiveBlock-Wiederholung
+bool kwpRxInterbyteTimeout = false;
 
 // Aktuell im MSG vorhandene Codierung
 uint16_t currentCodeblock = 0;
@@ -190,8 +202,6 @@ enum DisplayMode {
   MODE_BOOST,
   MODE_CONSUMPTION,
   MODE_AVERAGE_CONSUMPTION,
-  MODE_RPM,
-  MODE_INJECTION,
   MODE_CUSTOM,
   MODE_CODEBLOCK
 };
@@ -210,17 +220,17 @@ const uint8_t SCR_BOOST       = 2;
 const uint8_t SCR_CONSUMPTION = 3;
 const uint8_t SCR_AVERAGE     = 4;
 const uint8_t SCR_INJECTION   = 5;
-const uint8_t SCR_CUSTOM1     = 10;   // 10..13 = eigene Messwerte
+const uint8_t SCR_CUSTOM1     = 10;   // 10..17 = eigene Messwerte
 
 const uint8_t MAX_SCREENS = 12;
-const uint8_t MAX_CUSTOM  = 4;
+const uint8_t MAX_CUSTOM  = 8;
 
 // Standard = bisherige Reihenfolge
 uint8_t screenList[MAX_SCREENS] = {
-  SCR_VOLTAGE, SCR_RPM, SCR_BOOST,
-  SCR_CONSUMPTION, SCR_AVERAGE, SCR_INJECTION
+  SCR_VOLTAGE, SCR_BOOST,
+  SCR_CONSUMPTION, SCR_AVERAGE
 };
-uint8_t screenCount = 6;
+uint8_t screenCount = 4;
 uint8_t screenIndex = 0;
 uint8_t currentScreenId = SCR_VOLTAGE;
 
@@ -333,6 +343,11 @@ bool faultRequestRunning = false;
 String faultStatusText = "Noch nicht gelesen";
 // true = Fehlerspeicher wird gerade beim Start gelesen
 bool startupFaultCheck = false;
+
+// FSP-Hinweis nach dem Startcheck (10 s statt Spannung)
+bool fspNoticeActive = false;
+uint32_t fspNoticeStart = 0;
+const uint32_t FSP_NOTICE_MS = 10000;
 
 enum FaultRequestType {
   FAULT_REQUEST_NONE,
@@ -734,18 +749,20 @@ bool readInitialResponse() {
   return true;
 }
 
-
 // =====================================================
-// KWP1281-BLOCK EMPFANGEN
+// KWP1281-BLOCK EINMAL EMPFANGEN
 // =====================================================
 
-bool kwpReceiveBlock(
+bool kwpReceiveBlockOnce(
   uint8_t *buffer,
   uint16_t maxSize,
   uint16_t &size) {
   size = 0;
 
   uint8_t value = 0;
+
+  // Merker: Abbruch mitten im Block?
+  kwpRxInterbyteTimeout = false;
 
   Serial.println();
   Serial.print("Warte auf Block ");
@@ -788,6 +805,9 @@ bool kwpReceiveBlock(
         "FEHLER: Interbyte-Timeout bei Index ");
 
       Serial.println(index);
+
+      // SG wiederholt diesen Block laut KWP1281
+      kwpRxInterbyteTimeout = true;
 
       return false;
     }
@@ -835,6 +855,44 @@ bool kwpReceiveBlock(
   blockCounter++;
 
   return true;
+}
+
+
+// =====================================================
+// KWP1281-BLOCK EMPFANGEN MIT WIEDERHOLUNG
+//
+// Bricht der Empfang mitten im Block ab, sendet das SG
+// den Block nach seinem Timeout erneut. Darauf wird
+// einmal gewartet.
+// =====================================================
+
+bool kwpReceiveBlock(
+  uint8_t *buffer,
+  uint16_t maxSize,
+  uint16_t &size) {
+
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+
+    if (kwpReceiveBlockOnce(buffer, maxSize, size)) {
+      // Erfolgreich -> Zeitstempel für Keep-Alive
+      lastKwpRxTime = millis();
+      return true;
+    }
+
+    // Nur bei Abbruch mitten im Block wiederholt das SG
+    if (!kwpRxInterbyteTimeout) {
+      break;
+    }
+
+    Serial.println("Warte auf Blockwiederholung durch SG...");
+
+    // Reste des abgebrochenen Blocks verwerfen
+    clearKLineInput();
+  }
+
+  // Endgültig fehlgeschlagen -> echter Leitungsfehler
+  kwpLinkError = true;
+  return false;
 }
 
 
@@ -958,7 +1016,7 @@ bool kwpSendBlock(
       clearKLineInput();
     }
   }
-
+  kwpLinkError = true;
   return false;
 }
 
@@ -1010,6 +1068,31 @@ bool kwpSendEnd() {
   return result;
 }
 
+// =====================================================
+// KEEP-ALIVE: B01 senden, B01 vom SG empfangen
+// Hält die Verbindung ohne Neuadressierung offen
+// =====================================================
+
+void kwpKeepAlive() {
+#if TESTBENCH_MODE
+  return;
+#endif
+
+  if (!kwpConnected || faultRequestRunning) return;
+  if (millis() - lastKwpRxTime < KWP_KEEPALIVE_MS) return;
+
+  uint8_t buf[64];
+  uint16_t size = 0;
+
+  if (kwpSendAck() && kwpReceiveBlock(buf, sizeof(buf), size)) {
+    return;   // normalerweise kommt 0x09 zurück
+  }
+
+  Serial.println("Keep-Alive fehlgeschlagen, Verbindung verloren.");
+  stopKLine(false);
+  kwpConnected = false;
+  lastConnectAttempt = millis();
+}
 
 // =====================================================
 // CODIERUNGSBLOCK AUSWERTEN
@@ -1834,6 +1917,34 @@ bool readMeasurementGroup(
   return true;
 }
 
+// =====================================================
+// LADEDRUCK ALS UEBERDRUCK LESEN
+//
+// MWB 010 Feld 3 = Ladedruck (absolut)
+// MWB 010 Feld 2 = Atmosphaerischer Druck
+// Ueberdruck     = Feld 3 - Feld 2   [mBar]
+// =====================================================
+
+bool readBoostOverpressure() {
+  KwpValue g10[KWP_MAX_FIELDS];
+  uint8_t n = 0;
+
+  if (!readMeasurementGroup(10, g10, n, false) || n < 3) {
+    return false;
+  }
+
+  float overpressure =
+    (float)g10[2].value - (float)g10[1].value;
+
+  // Im Leerlauf kann es leicht negativ sein -> 0 anzeigen
+  if (overpressure < 0.0f) {
+    overpressure = 0.0f;
+  }
+
+  lastBoostMbar = (uint16_t)(overpressure + 0.5f);
+
+  return true;
+}
 
 // =====================================================
 // EINZELNEN MESSWERT LESEN
@@ -2091,16 +2202,12 @@ void oledShowValue(String value, String unit) {
 }
 
 void oledShowNormal() {
-  if (displayMode == MODE_RPM) {
-    oledShowValue(String(lastRpm), baseUnits[SCR_RPM]);
-  } else if (displayMode == MODE_BOOST) {
+  if (displayMode == MODE_BOOST) {
     oledShowValue(String(lastBoostMbar), baseUnits[SCR_BOOST]);
   } else if (displayMode == MODE_CONSUMPTION) {
     oledShowValue(String(fuelConsumption, 1), baseUnits[SCR_CONSUMPTION]);
   } else if (displayMode == MODE_AVERAGE_CONSUMPTION) {
     oledShowValue(String(averageFuelConsumption, 1), baseUnits[SCR_AVERAGE]);
-  } else if (displayMode == MODE_INJECTION) {
-    oledShowValue(String(injectionActual, 1), baseUnits[SCR_INJECTION]);
   } else if (displayMode == MODE_CUSTOM) {
     oledShowCustom();
   }
@@ -2188,11 +2295,9 @@ void oledShowWriting() {
   display.setCursor(0, 24);
   display.println("CODEBLOCK");
 
-  display.setCursor(0, 30);
-  display.println("wird");
 
   display.setCursor(0, 36);
-  display.println("geschrieben");
+  display.println("Schreiben");
 
   display.display();
 }
@@ -2290,6 +2395,30 @@ void measureVoltage() {
 }
 
 // =====================================================
+// OLED - HINWEIS "X FSP gefunden"
+// =====================================================
+
+void oledShowFspNotice() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // Max. 9 Fehler -> "X FSP" passt immer in Größe 2
+  String line1 = String(faultCount) + " FSP";
+
+  display.setTextSize(1);
+  display.setCursor(getCenteredX(line1), 24);
+  display.print(line1);
+
+  display.setTextSize(1);
+  String line2 = "gefunden";
+  display.setCursor(getCenteredX(line2), 36);
+  display.print(line2);
+
+  display.display();
+}
+
+
+// =====================================================
 // SPANNUNG MESSEN UND ANZEIGEN
 // =====================================================
 
@@ -2303,9 +2432,16 @@ void updateVoltageDisplay() {
     return;
   }
 
-
-
   lastVoltageDisplay = millis();
+
+  // FSP-Hinweis hat für 10 s Vorrang vor der Spannung
+  if (fspNoticeActive) {
+    if (millis() - fspNoticeStart < FSP_NOTICE_MS) {
+      oledShowFspNotice();
+      return;
+    }
+    fspNoticeActive = false;
+  }
 
   measureVoltage();
 
@@ -2326,15 +2462,6 @@ void updateVoltageDisplay() {
 
 
 
-  // Fehlerhinweis, wenn FSP-Einträge vorhanden sind
-  if (faultMemoryValid && faultCount > 0) {
-    display.setTextSize(1);
-
-    String warn = "! " + String(faultCount) + " FSP";
-
-    display.setCursor(getCenteredX(warn), 22);
-    display.print(warn);
-  }
 
   // ----------------------------------------
   // Spannung
@@ -2382,6 +2509,9 @@ void updateVoltageDisplay() {
 // =====================================================
 
 bool screenValid(int id) {
+  // Drehzahl und Einspritzmenge entfallen (über eigene Messwerte möglich)
+  if (id == SCR_RPM || id == SCR_INJECTION) return false;
+
   if (id >= SCR_VOLTAGE && id <= SCR_INJECTION) return true;
 
   if (id >= SCR_CUSTOM1 && id < SCR_CUSTOM1 + MAX_CUSTOM) {
@@ -2465,11 +2595,10 @@ void applyScreen(uint8_t id) {
       updateVoltageDisplay();
       return;
 
-    case SCR_RPM:         displayMode = MODE_RPM;                 break;
     case SCR_BOOST:       displayMode = MODE_BOOST;               break;
     case SCR_CONSUMPTION: displayMode = MODE_CONSUMPTION;         break;
     case SCR_AVERAGE:     displayMode = MODE_AVERAGE_CONSUMPTION; break;
-    case SCR_INJECTION:   displayMode = MODE_INJECTION;           break;
+
 
     default:
       displayMode = MODE_CUSTOM;
@@ -2853,9 +2982,6 @@ void updateMeasurements() {
   // Fehlerspeicher-Seite offen -> keine Live-Messwerte auf der K-Line,
   // Spannungsanzeige am OLED läuft weiter
   if (faultPageActive()) {
-    if (kwpConnected && !faultRequestRunning) {
-      disconnectMSG();
-    }
     updateVoltageDisplay();
     return;
   }
@@ -2866,10 +2992,7 @@ void updateMeasurements() {
 
   if (displayMode == MODE_VOLTAGE) {
 
-    // Ohne Webseite: MSG-Verbindung wie bisher beenden
-    if (!webActive && kwpConnected) {
-      disconnectMSG();
-    }
+
 
     updateVoltageDisplay();
 
@@ -2936,12 +3059,14 @@ void updateMeasurements() {
 
 #else
   bool readOk = false;
+  kwpLinkError = false;
+
 
   KwpValue v;
 
   // ================================================
   // WEBSEITE OFFEN -> ALLE LIVEWERTE
-  // MWB 001 Feld 1+2, MWB 011 Feld 3
+  // MWB 001 Feld 1+2, MWB 010 Feld 2
   // ================================================
 
   if (webActive && mwbActive()) {
@@ -2980,11 +3105,11 @@ void updateMeasurements() {
       lastRpm = (uint16_t)g1[0].value;
       injectionActual = (float)g1[1].value;
 
-      if (readMeasurement(11, 3, v, false)) {
-        lastBoostMbar = (uint16_t)v.value;
+      // Ueberdruck = MWB 010 Feld 3 - Feld 2
+      if (readBoostOverpressure()) {
         readOk = true;
       }
-
+	  
       // OLED zeigt eigenen Messwert -> zusätzlich lesen
       if (readOk && displayMode == MODE_CUSTOM) {
         CustomScreen &c = customScreens[activeCustom];
@@ -3010,26 +3135,14 @@ void updateMeasurements() {
     }
   }
 
-  // ================================================
-  // DREHZAHL -> MWB 001 Feld 1
-  // ================================================
-
-  else if (displayMode == MODE_RPM) {
-    readOk = readMeasurement(1, 1, v, false);
-    if (readOk) {
-      lastRpm = (uint16_t)v.value;
-    }
-  }
 
   // ================================================
-  //   -> MWB 011 Feld 3
+  //   -> MWB 010 Feld 2
   // ================================================
 
   else if (displayMode == MODE_BOOST) {
-    readOk = readMeasurement(11, 3, v, false);
-    if (readOk) {
-      lastBoostMbar = (uint16_t)v.value;
-    }
+    // Ueberdruck = MWB 010 Feld 3 - Feld 2
+    readOk = readBoostOverpressure();
   }
 
   // ================================================
@@ -3081,16 +3194,6 @@ void updateMeasurements() {
     }
   }
 
-  // ================================================
-  // EINSPRITZMENGE -> MWB 001 Feld 2
-  // ================================================
-
-  else if (displayMode == MODE_INJECTION) {
-    readOk = readMeasurement(1, 2, v, false);
-    if (readOk) {
-      injectionActual = (float)v.value;
-    }
-  }
 
   // ================================================
   // FAHRT-DURCHSCHNITT IN ALLEN ANDEREN MODI
@@ -3113,22 +3216,24 @@ void updateMeasurements() {
     }
   }
 
-  // ================================================
-  // FEHLER: VERBINDUNG ZURUECKSETZEN
-  // ================================================
-
   if (!readOk) {
+
+    // SG hat nur abgelehnt -> Verbindung behalten
+    if (kwpConnected && !kwpLinkError) {
+      Serial.println("SG hat Anfrage abgelehnt, Verbindung bleibt bestehen.");
+      return;
+    }
 
     Serial.println();
     Serial.println("Messwert fehlgeschlagen.");
     Serial.println("Verbindung wird zurueckgesetzt.");
 
-    stopKLine(true);
+    // Kein blockierendes Warten noetig, Reconnect-Pause ist 15 s
+    stopKLine(false);
     kwpConnected = false;
-
-    // Nicht sofort neu adressieren, MSG Zeit geben
     lastConnectAttempt = millis();
 
+    oledShowValue("---", "kein MSG");
     return;
   }
 
@@ -3157,21 +3262,22 @@ void processFaultRequest() {
   
 
 
-  // Laufende Messwert-Verbindung sauber beenden
-  if (kwpConnected) disconnectMSG();
-  delay(100);
-
   bool result = false;
+  kwpLinkError = false;
 
+  // connectMSG() gibt sofort true zurück, wenn bereits verbunden
   if (connectMSG(startupFaultCheck ? 1 : MAX_CONNECT_ATTEMPTS)) {
     result = (request == FAULT_REQUEST_READ)
                ? readFaultMemory()
                : clearFaultMemory();
   }
 
-  if (kwpConnected) disconnectMSG();
-  else stopKLine(false);
-  kwpConnected = false;
+  // Nur bei echtem Leitungsfehler trennen
+  if (kwpConnected && kwpLinkError) {
+    stopKLine(false);
+    kwpConnected = false;
+    lastConnectAttempt = millis();
+  }
 
   if (result) {
     faultMemoryValid = true;
@@ -3194,8 +3300,14 @@ void processFaultRequest() {
 
   faultRequestRunning = false;
   lastMeasurementTime = millis();
-  
-    startupFaultCheck = false;
+
+  // Nur beim Startcheck: gefundene FSP 10 s lang anzeigen
+  if (startupFaultCheck && result && faultCount > 0) {
+    fspNoticeActive = true;
+    fspNoticeStart = millis();
+  }
+
+  startupFaultCheck = false;
 
   // Spannungsanzeige sofort neu zeichnen (mit/ohne "!")
   lastVoltageDisplay = 0;
@@ -3552,7 +3664,7 @@ void handleApiOledCustom() {
 
   if (slot < 0) {
     server.send(409, "application/json; charset=utf-8",
-      "{\"ok\":false,\"msg\":\"Alle 4 Plätze belegt. Bitte unter OLED-Anzeige einen löschen.\"}");
+      "{\"ok\":false,\"msg\":\"Alle 8 Plätze belegt. Bitte unter OLED-Anzeige einen löschen.\"}");
     return;
   }
 
@@ -3660,7 +3772,7 @@ void handleApiOledUnit() {
   char label[10];
   sanitizeLabel(server.arg("n"), label);
 
-  if (id >= SCR_VOLTAGE && id <= SCR_INJECTION) {
+  if (id >= SCR_VOLTAGE && id <= SCR_INJECTION && screenValid(id)) {
 
     // Leer -> Standard wiederherstellen
     if (label[0] == 0) {
@@ -3844,6 +3956,7 @@ void loop() {
 
   // Fehlerspeicher hat Vorrang
   processFaultRequest();
+  kwpKeepAlive();
 
   if (!faultRequestRunning &&
       pendingFaultRequest == FAULT_REQUEST_NONE) {
