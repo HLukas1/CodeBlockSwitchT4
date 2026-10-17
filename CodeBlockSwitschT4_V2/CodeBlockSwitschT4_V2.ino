@@ -151,7 +151,7 @@ uint16_t currentCodeblock = 0;
 // WLAN-HOTSPOT / WEBSERVER /SSID
 // =====================================================
 
-const char* AP_SSID = "TDI-Dashboard";
+const char* AP_SSID = "CodeBlockSwitchT4";
 const char* AP_PASS = "12345678";   // mind. 8 Zeichen
 
 WebServer server(80);
@@ -2363,7 +2363,7 @@ const float R_TOP = 47000000.0;
 const float R_BOTTOM = 10000000.0;
 
 // Dein bisheriger Korrekturwert
-float voltageOffset = -1.24;
+float voltageOffset = 0;
 
 // Messung
 const int NUM_SAMPLES = 50;
