@@ -2991,15 +2991,9 @@ void updateMeasurements() {
   // =====================================================
 
   if (displayMode == MODE_VOLTAGE) {
-
-
-
+    // Spannung kommt vom ADC. KWP läuft trotzdem weiter,
+    // damit der Fahrt-Durchschnitt von Anfang an mitzählt.
     updateVoltageDisplay();
-
-    // Ohne Webseite kein KWP-Lesen im Spannungsmodus
-    if (!webActive) {
-      return;
-    }
   }
 
   // =====================================================
@@ -3194,6 +3188,14 @@ void updateMeasurements() {
     }
   }
 
+  // ================================================
+  // SPANNUNG -> nichts zu lesen, nur Fahrt-Durchschnitt (unten)
+  // ================================================
+
+  else if (displayMode == MODE_VOLTAGE) {
+    readOk = true;
+  }
+
 
   // ================================================
   // FAHRT-DURCHSCHNITT IN ALLEN ANDEREN MODI
@@ -3233,7 +3235,10 @@ void updateMeasurements() {
     kwpConnected = false;
     lastConnectAttempt = millis();
 
-    oledShowValue("---", "kein MSG");
+    // Spannungsanzeige nicht überschreiben
+    if (displayMode != MODE_VOLTAGE) {
+      oledShowValue("---", "kein MSG");
+    }
     return;
   }
 
