@@ -11,9 +11,9 @@
 </p>
 
 <p align="center">
-  <img src="images/geraet_eingebaut.jpg" height="420" alt="Eingebaut im T4-Armaturenbrett">
+  <img src="images/geraet_eingebaut.jpg" height="320" alt="Eingebaut im T4-Armaturenbrett">
   &nbsp;
-  <a href="images/demo.mp4"><img src="images/demo.gif" height="420" alt="Bildschirme durchschalten (Video)"></a>
+  <a href="images/demo.mp4"><img src="images/demo.gif" height="320" alt="Bildschirme durchschalten (Video)"></a>
 </p>
 <p align="center"><sub>Eingebaut im Armaturenbrett · Bildschirme per Taster durchschalten (antippen für das Video)</sub></p>
 
