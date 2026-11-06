@@ -1,179 +1,167 @@
-# CodeBlockSwitcherT4_V2 – KWP1281-Diagnose mit ESP32-C3
+<p align="center">
+  <img src="images/app_icon.png" width="120" alt="App-Icon CodeBlockSwitchT4">
+</p>
 
-Ein kompaktes Anzeige- und Diagnosegerät für VAG-Fahrzeuge mit K-Line (KWP1281). Es liest Messwerte aus dem Motorsteuergerät (MSG), zeigt sie auf einem 64×48-OLED an und stellt über einen eigenen WLAN-Hotspot ein Web-Dashboard für das Handy bereit.
+<h1 align="center">CodeBlockSwitchT4</h1>
 
-![Schaltplan](images/schaltplan.svg)
+<p align="center">
+  <b>Kleines OBD-Gerät für den VW T4 TDI: Live-Messwerte auf dem OLED und dem Handy,<br>
+  Fehlerspeicher im Klartext und Codeblock-Umschaltung 102 ↔ 138 PS.</b><br>
+  ESP32-C3 · K-Line (KWP1281) · eigener WLAN-Hotspot · keine App, kein Internet nötig
+</p>
+
+<p align="center">
+  <img src="images/webapp_live.jpg" width="200" alt="Live">
+  <img src="images/webapp_messwerte.jpg" width="200" alt="Messwerte">
+  <img src="images/webapp_oled.jpg" width="200" alt="OLED-Anzeige">
+  <img src="images/webapp_einstellungen.jpg" width="200" alt="Einstellungen">
+</p>
 
 ---
 
 ## Inhalt
 
-1. [Funktionen](#funktionen)
-2. [Stückliste](#stückliste)
-3. [Schaltung](#schaltung)
-4. [Software einrichten](#software-einrichten)
-5. [Projektstruktur](#projektstruktur)
-6. [Konfiguration](#konfiguration)
-7. [Bedienung am Gerät](#bedienung-am-gerät)
-8. [Web-Oberfläche](#web-oberfläche)
+1. [Was das Gerät kann](#was-das-gerät-kann)
+2. [Voll modular: jeder Messwert](#voll-modular-jeder-messwert)
+3. [Materialliste](#materialliste)
+4. [Stromlaufplan](#stromlaufplan)
+5. [Software aufspielen](#software-aufspielen)
+6. [Bedienung am Gerät](#bedienung-am-gerät)
+7. [WebApp](#webapp)
+8. [Einstellungen im Code](#einstellungen-im-code)
 9. [Technische Details](#technische-details)
 10. [Fehlersuche](#fehlersuche)
 11. [Sicherheitshinweise](#sicherheitshinweise)
 
 ---
 
-## Funktionen
+## Was das Gerät kann
 
-- **Live-Anzeige auf dem OLED:** Bordspannung, Drehzahl, Ladedruck, aktueller Verbrauch, Fahrt-Durchschnitt, Einspritzmenge
-- **Eigene Messwerte:** bis zu 4 beliebige Felder aus beliebigen Messwerteblöcken, markiert mit ★
-- **Frei konfigurierbare Reihenfolge und Einheiten**, dauerhaft im Flash gespeichert
-- **Fehlerspeicher lesen und löschen** mit Klartext, Ursache und Auswirkung
-- **Startcheck:** Beim Einschalten wird der Fehlerspeicher einmal gelesen; bei Einträgen zeigt das Spannungsdisplay `! n FSP`
-- **Codeblock-Umschaltung** 2 (102 PS) ↔ 3 (138 PS) per langem Tastendruck, WSC bleibt erhalten
-- **Web-Dashboard** über eigenen WLAN-Hotspot, ohne Internet und ohne App
-- **Testbench-Modus** zum Entwickeln ohne Fahrzeug
+Der CodeBlockSwitchT4 steckt in der OBD-Buchse, spricht über die K-Line mit dem Motorsteuergerät (KWP1281) und zeigt die Werte auf einem kleinen OLED an. Gleichzeitig öffnet er einen eigenen WLAN-Hotspot, über den du im Browser deines Handys alles siehst und einstellst.
+
+| | |
+|---|---|
+| 📟 **OLED-Anzeige** | Bordspannung, Ladedruck, aktueller Verbrauch, Fahrt-Durchschnitt und beliebig viele eigene Messwerte, per Taster durchschalten |
+| 📱 **WebApp** | Alle ausgewählten Werte live auf dem Handy, dazu Messwerteblöcke, Fehlerspeicher, OLED-Konfiguration und Einstellungen |
+| 🧩 **Voll modular** | Jedes Feld aus jedem Messwerteblock (1–255) lässt sich als eigener Wert auf OLED und Handy legen |
+| ⚡ **Codeblock 2 ↔ 3** | 102 PS ↔ 138 PS per langem Tastendruck oder in der WebApp, der WSC bleibt erhalten |
+| 🔧 **Fehlerspeicher** | Lesen und Löschen mit Klartext, Ursache und Auswirkung; beim Start automatischer Check (`! n FSP`) |
+| ⛽ **Verbrauch** | Aktueller Verbrauch in L/100 km und Fahrt-Durchschnitt, berechnet aus Einspritzmenge, Drehzahl und Geschwindigkeit |
+| 🔌 **Diagnose aus** | K-Line auf Knopfdruck freigeben, z. B. für VCDS, ohne das Gerät abzuziehen |
+| 💾 **Alles gespeichert** | Bildschirme, Einheiten, eigene Werte und Einstellungen bleiben nach dem Ausschalten erhalten |
 
 ---
 
-## Stückliste
+## Voll modular: jeder Messwert
+
+Das Gerät ist nicht auf fest einprogrammierte Werte beschränkt. **Jeder Messwert, den das Motorsteuergerät liefert, kann zur Anzeige werden**, ganz ohne Code-Änderung:
+
+1. In der WebApp unter **Messwerte** einen Block wählen (1–255). Das Gerät liest alle vier Felder live und rechnet sie mit der passenden Einheit um.
+2. Auf die gewünschte Karte tippen und bestätigen. Der Wert erscheint als **★ eigener Messwert**.
+3. Er ist sofort auf dem OLED (Taster) **und** auf der Live-Seite im Handy zu sehen.
+4. Unter **OLED** kannst du ihm eine kurze Bezeichnung geben (✎), ihn verschieben (▲▼), ausblenden (✕) oder löschen (🗑).
+
+| Was | Wie viel |
+|---|---|
+| Eigene Messwerte | bis zu **8** |
+| Bildschirme in der Reihenfolge | bis zu **12** (plus Codeblock) |
+| Feste Bildschirme | Spannung, Ladedruck, Verbrauch, Durchschnitt |
+| Umrechnungen | 70 KWP1281-Kennzahlen (Temperatur, Druck, Winkel, Spannung, Text …) |
+| Hinterlegte Blöcke | 16 Blöcke mit Titel und Feldnamen, 62 Fehlercodes mit Klartext |
+
+Drehzahl oder Einspritzmenge stehen deshalb nicht als feste Bildschirme bereit: Sie sind einfach eigene Messwerte aus Block 1.
+
+---
+
+## Materialliste
 
 | Anzahl | Bauteil | Hinweis |
 |---|---|---|
-| 1 | ESP32-C3 SuperMini | USB-C, onboard LED an GPIO8 |
-| 1 | L9637D | K-Line-Transceiver, SO-8 (ggf. mit Adapterplatine) |
-| 1 | OLED 0,66" 64×48, SSD1306, I²C | Adresse 0x3C |
+| 1 | ESP32-C3 SuperMini | USB-C, LED an GPIO8 |
+| 1 | L9637D | K-Line-Transceiver, SO-8 (ggf. auf Adapterplatine) |
+| 1 | OLED 0,66″ 64×48, SSD1306, I²C | Adresse `0x3C` |
 | 1 | Step-Down-Wandler 12 V → 5 V | z. B. MP1584 oder Mini-360, mind. 500 mA |
-| 1 | Widerstand 510 Ω | Pull-up K-Line nach +12 V |
-| 2 | Widerstände für Spannungsteiler | Verhältnis 47 : 10, siehe unten |
-| 1 | Taster (Schließer) | zwischen GPIO9 und GPIO5 |
+| 1 | Widerstand 510 Ω (R1) | K-Line-Pull-up zwischen K (Pin 5) und VS (Pin 6) des L9637D |
+| 1 | Kondensator 100 nF (C1) | zwischen VS (Pin 6) und GND des L9637D |
+| 1 | Widerstand 47 kΩ (R2) | Spannungsteiler oben |
+| 1 | Widerstand 10 kΩ (R3) | Spannungsteiler unten |
+| 1 | Taster, Schließer (S1) | zwischen GPIO9 und GPIO5 |
 | 1 | OBD-II-Stecker (männlich) | Pins 4, 5, 7, 16 belegt |
-| 1 | Diode 1N4007 (optional) | Verpolschutz in der +12-V-Leitung |
-| 1 | Kondensator 100 nF + 10 µF (optional) | Abblockung an VCC des L9637D |
-| – | Gehäuse, Litzen, Lochraster | |
+| 1 | Gehäuse | 3D-Druck: [`T4 Codeblock Switcher.stl`](T4%20Codeblock%20Switcher.stl) |
+| – | Litze, Lochraster, Schrumpfschlauch | |
 
 ---
 
-## Schaltung
+## Stromlaufplan
 
-### OBD-II-Buchse
-
-| OBD-Pin | Signal |
-|---|---|
-| 4 / 5 | Masse |
-| 7 | K-Line |
-| 16 | +12 V Dauerplus |
+![Stromlaufplan](images/stromlaufplan.svg)
 
 ### Verdrahtung
 
 | Von | Nach | Bemerkung |
 |---|---|---|
-| OBD 16 (+12 V) | Step-Down IN+, L9637D Pin 6 (VS), Spannungsteiler oben | |
-| OBD 4/5 (GND) | Step-Down IN−, gemeinsame Masse | |
+| OBD 16 (+12 V Dauerplus) | Step-Down IN+, L9637D VS (Pin 6), R2 | |
+| OBD 4 / 5 (Masse) | gemeinsame Masse | |
 | Step-Down OUT+ (5 V) | ESP32 **5V** | |
-| OBD 7 (K-Line) | L9637D Pin 5 (K) | 510 Ω von K nach +12 V |
-| L9637D Pin 3 (VCC) | ESP32 **3V3** | Logikpegel 3,3 V; Datenblatt prüfen |
-| L9637D Pin 4 (GND) | GND | |
-| L9637D Pin 8 (TX) | ESP32 **GPIO10** | `KLINE_TX` |
-| L9637D Pin 1 (RX) | ESP32 **GPIO1** | `KLINE_RX` |
-| L9637D Pin 2 / 7 (LI/LO) | frei | L-Line wird nicht benutzt |
-| OLED SDA | ESP32 **GPIO6** | |
-| OLED SCL | ESP32 **GPIO7** | |
+| OBD 7 (K-Line) | L9637D K (Pin 5) | R1 510 Ω zwischen K und VS |
+| L9637D VS (Pin 6) | GND | C1 100 nF |
+| L9637D VCC (Pin 3) | ESP32 **3V3** | 3,3-V-Pegel für den ESP32 |
+| L9637D GND (Pin 4) | GND | |
+| L9637D TX (Pin 8) | ESP32 **GPIO10** | `KLINE_TX` |
+| L9637D RX (Pin 1) | ESP32 **GPIO1** | `KLINE_RX` |
+| L9637D LI / LO (Pin 2 / 7) | frei | L-Line wird nicht benutzt |
+| OLED SDA / SCL | ESP32 **GPIO6** / **GPIO7** | |
 | OLED VCC / GND | 3V3 / GND | |
-| Taster Kontakt 1 | ESP32 **GPIO9** | interner Pull-up |
-| Taster Kontakt 2 | ESP32 **GPIO5** | wird per Software auf LOW gelegt |
-| Spannungsteiler Mitte | ESP32 **GPIO0** | ADC |
+| Taster | ESP32 **GPIO9** ↔ **GPIO5** | GPIO9 mit internem Pull-up, GPIO5 per Software auf LOW |
+| Mitte R2 / R3 | ESP32 **GPIO0** | Bordspannung (ADC) |
 
-### Spannungsteiler
+**Spannungsteiler:** Im Code ist das Verhältnis 47 : 10 hinterlegt (`R_TOP`, `R_BOTTOM`). Bei 16 V liegen so etwa 2,8 V am ADC. Kleine Abweichungen gleichst du in der WebApp mit der **Spannungskorrektur** aus.
 
-```
-+12 V ──[ R_TOP ]──┬── GPIO0
-                   │
-                [ R_BOTTOM ]
-                   │
-                  GND
-```
-
-Im Code ist das Verhältnis **47 : 10** hinterlegt (`R_TOP`, `R_BOTTOM`). Bei 16 V am Eingang liegen damit etwa 2,8 V am ADC, also unter 3,3 V. Verwende z. B. 47 kΩ / 10 kΩ und trage deine echten Werte im Code ein. Kleine Abweichungen gleichst du mit `voltageOffset` aus (Multimeter-Vergleich).
-
-> **Hinweis zu GPIO9:** GPIO9 ist beim ESP32-C3 ein Boot-Pin. Wird der Taster beim Einschalten gedrückt, startet der ESP im Download-Modus. Beim normalen Betrieb nicht drücken, während Spannung angelegt wird.
+> **GPIO9 ist ein Boot-Pin.** Wird der Taster beim Einschalten gedrückt, startet der ESP32 im Download-Modus und das Programm läuft nicht.
 
 ---
 
-## Software einrichten
+## Software aufspielen
 
-### 1. Arduino IDE
+### 1. Arduino IDE vorbereiten
 
 1. Arduino IDE 2.x installieren.
 2. **Datei → Einstellungen → Zusätzliche Boardverwalter-URLs**:
    ```
    https://espressif.github.io/arduino-esp32/package_esp32_index.json
    ```
-3. **Boardverwalter** → „esp32 by Espressif Systems“ installieren.
-
-### 2. Bibliotheken
-
-Über **Werkzeuge → Bibliotheken verwalten** installieren:
-
-| Bibliothek | Autor |
-|---|---|
-| Adafruit SSD1306 | Adafruit |
-| Adafruit GFX Library | Adafruit (wird meist automatisch mitinstalliert) |
+3. Im **Boardverwalter** „esp32 by Espressif Systems“ installieren.
+4. Unter **Werkzeuge → Bibliotheken verwalten** installieren:
+   - **Adafruit SSD1306**
+   - **Adafruit GFX Library** (kommt meist automatisch mit)
 
 `WiFi`, `WebServer`, `Wire` und `Preferences` sind im ESP32-Paket enthalten.
 
-> Das 64×48-Display funktioniert mit der normalen Adafruit-SSD1306-Bibliothek, weil Breite und Höhe im Konstruktor übergeben werden.
-
-### 3. Board-Einstellungen
+### 2. Board-Einstellungen
 
 | Einstellung | Wert |
 |---|---|
 | Board | ESP32C3 Dev Module |
 | USB CDC On Boot | **Enabled** (sonst keine Ausgabe im seriellen Monitor) |
 | Flash Size | 4MB |
-| Partition Scheme | Default 4MB; bei „Sketch too big“: **Huge APP (3MB No OTA)** |
+| Partition Scheme | Default 4MB (bei „Sketch too big“: Huge APP) |
 | Upload Speed | 921600 |
+
+### 3. Vor dem ersten Flashen
+
+**WLAN-Passwort ändern!** Über die WebApp lässt sich der Codeblock des Steuergeräts schreiben. In `CodeBlockSwitchT4.ino`:
+
+```cpp
+const char* AP_SSID = "CodeBlockSwitchT4";
+const char* AP_PASS = "12345678";   // mind. 8 Zeichen – unbedingt ändern
+```
 
 ### 4. Hochladen
 
-1. ESP per USB-C anschließen.
-2. Port wählen.
-3. **Hochladen**. Klappt es nicht: BOOT-Taste gedrückt halten, RESET kurz drücken, BOOT loslassen.
-4. Serieller Monitor auf **115200 Baud**.
-
----
-
-## Projektstruktur
-
-Alle Dateien liegen im selben Sketch-Ordner und erscheinen in der IDE als Tabs.
-
-```
-CodeblockSwitscherT4_V2/
-├── CodeblockSwitscherT4_V2.ino   Logik: K-Line, KWP1281, OLED, Taster, Web-Handler
-├── WebPages.h          HTML / CSS / JavaScript der 4 Webseiten
-├── FaultTable.h        Fehlercodes mit Text, OBD-Code, Ursache, Auswirkung
-└── MwbTable.h          Titel und Feldnamen der Messwerteblöcke
-```
-
-`FaultTable.h` muss `FAULT_TABLE[]` (Felder `obd`, `text`, `cause`, `effect`) und `findFaultIndex(code)` bereitstellen. `MwbTable.h` stellt `MWB_TABLE[]` (Felder `title`, `cond`, `f[4].name`, `f[4].unit`) und `findMwbIndex(group)` bereit. `MwbTable.h` wird nach `jsonEscape()` eingebunden.
-
----
-
-## Konfiguration
-
-Wichtige Konstanten am Anfang der `.ino`:
-
-| Konstante | Standard | Bedeutung |
-|---|---|---|
-| `TESTBENCH_MODE` | `0` | `1` = Fahrzeug wird simuliert |
-| `MSG_ADDRESS` | `0x01` | Adresse Motorsteuergerät |
-| `KLINE_BAUD` | `9600` | Baudrate nach Init (ggf. 10400) |
-| `AP_SSID` / `AP_PASS` | `TDI-Dashboard` / `12345678` | WLAN-Hotspot – **Passwort ändern!** |
-| `BUTTON_LONG_PRESS_MS` | `3000` | Dauer langer Tastendruck |
-| `MEASUREMENT_INTERVAL_MS` | `500` | Messintervall |
-| `R_TOP`, `R_BOTTOM`, `voltageOffset` | 47:10, −1,24 | Spannungsmessung kalibrieren |
-| `INJECTIONS_PER_REV` | `2.5` | 5-Zylinder; 4-Zyl. = 2.0 |
-
-Die Verbrauchsberechnung setzt Einspritzmenge (MWB 1 Feld 2), Drehzahl (MWB 1 Feld 1) und Geschwindigkeit (MWB 6 Feld 1) voraus. Ladedruck kommt aus MWB 11 Feld 3. Bei anderen Motoren die Blöcke anpassen.
+1. Den Ordner `CodeBlockSwitchT4` öffnen (der Ordnername muss zum `.ino`-Namen passen).
+2. ESP32 per USB-C anschließen, Port wählen, **Hochladen**.
+3. Klappt es nicht: BOOT gedrückt halten, RESET kurz drücken, BOOT loslassen.
+4. Serieller Monitor: **115200 Baud**.
 
 ---
 
@@ -184,84 +172,205 @@ Die Verbrauchsberechnung setzt Einspritzmenge (MWB 1 Feld 2), Drehzahl (MWB 1 Fe
 | Aktion | Wirkung |
 |---|---|
 | Kurz drücken | nächster Bildschirm laut Reihenfolge |
-| Nach dem letzten Bildschirm | Codeblock-Anzeige (`CB: 2 / 102PS`) |
+| Nach dem letzten Bildschirm | Codeblock-Anzeige (`CB: 3 / 138PS`) |
 | Kurz drücken im Codeblock | zurück zum ersten Bildschirm |
-| Lang drücken (≥ 3 s) im Codeblock | Codierung 2 ↔ 3 schreiben |
+| Lang drücken im Codeblock (Std. 3 s) | Codeblock 2 ↔ 3 schreiben |
+| Sehr lang drücken im Spannungsbildschirm (Std. 5 s) | Diagnose aus ↔ an |
 
-Beim Start erscheint das VW-Logo, danach der erste Bildschirm der gespeicherten Liste. Im Spannungsmodus ist die K-Line frei, solange die Webseite nicht offen ist.
+Beim Einschalten erscheint das Startlogo, dann wird einmal der Fehlerspeicher gelesen. Findet das Gerät Einträge, zeigt der Spannungsbildschirm kurz `! n FSP`.
+
+**Diagnose aus (z. B. für VCDS):** Im Spannungsbildschirm sehr lang drücken. Das Gerät beendet die Verbindung sauber, zeigt `Diag aus` und lässt die K-Line komplett frei. Bildschirmwechsel, Codeblock und Fehlerspeicher sind dann gesperrt. Der Zustand bleibt auch nach einem Neustart erhalten. Erneut sehr lang drücken schaltet die Diagnose wieder ein; vorher das andere Diagnosegerät abziehen.
 
 ---
 
-## Web-Oberfläche
+## WebApp
 
-![Web-Struktur](images/web_struktur.svg)
+### Verbinden
 
-1. Mit dem WLAN **TDI-Dashboard** verbinden.
-2. Im Browser **http://192.168.4.1** öffnen.
-3. Android meldet „kein Internet“ – Verbindung trotzdem beibehalten und mobile Daten ggf. kurz ausschalten.
+1. Zündung an – das Gerät startet und öffnet den Hotspot.
+2. Am Handy mit dem WLAN **CodeBlockSwitchT4** verbinden (Passwort aus dem Code).
+3. Im Browser **http://192.168.4.1** öffnen.
+4. Android meldet „kein Internet“: Verbindung trotzdem behalten, ggf. mobile Daten kurz ausschalten.
 
-| Seite | Inhalt |
-|---|---|
-| `/` Dashboard | Drehzahl, Ladedruck, Einspritzmenge, Spannung live |
-| `/mwb` Messwerteblöcke | Block 1–255 wählen; Karte antippen → als ★ eigener Messwert aufs OLED |
-| `/faults` Fehlerspeicher | Lesen, Löschen, Klartext mit Ursache und Auswirkung |
-| `/oled` OLED-Anzeige | Reihenfolge ▲▼, ausblenden ✕, Einheit ✎, eigene Messwerte 🗑 |
+**Als App auf den Startbildschirm legen:**
 
-Änderungen an Einheiten und eigenen Messwerten werden sofort gespeichert. Die Reihenfolge erst mit **„Reihenfolge speichern“**. Alles bleibt nach einem Neustart erhalten (Preferences-Namespace `oled`).
+- **iPhone:** in Safari **Teilen → Zum Home-Bildschirm** – startet danach als „T4“ im Vollbild mit eigenem Icon.
+- **Android:** in Chrome **⋮ → Zum Startbildschirm hinzufügen**.
 
-### API
+### Seiten
 
-| Methode | Pfad | Funktion |
+<table>
+<tr>
+<td width="210"><img src="images/webapp_live.jpg" width="200" alt="Live"></td>
+<td>
+
+**Live**
+
+Zeigt genau die Werte, die unter **OLED** ausgewählt sind – in derselben Reihenfolge und mit deinen Bezeichnungen. Der Wert, der gerade am Gerät zu sehen ist, ist blau markiert.
+
+Darunter steht der aktive **Codeblock** (102 PS / 138 PS) mit einem Knopf zum Umschalten. Nach dem Schreiben erscheint **„Bitte Zündungswechsel durchführen“** – die neue Leistung ist erst nach Zündung aus/an aktiv.
+
+</td>
+</tr>
+<tr>
+<td><img src="images/webapp_messwerte.jpg" width="200" alt="Messwerte"></td>
+<td>
+
+**Messwerte**
+
+Blättert durch alle Messwerteblöcke 1–255. Jede Karte zeigt Feldname, Wert und Einheit sowie die Rohdaten (Kennzahl, a, b).
+
+**Karte antippen** → der Wert wird zum eigenen Messwert für OLED und Live-Seite.
+
+</td>
+</tr>
+<tr>
+<td><img src="images/webapp_oled.jpg" width="200" alt="OLED-Anzeige"></td>
+<td>
+
+**OLED**
+
+Legt fest, was am Gerät und auf der Live-Seite angezeigt wird:
+
+- ▲ ▼ Reihenfolge (erster Eintrag = Startbildschirm)
+- ✕ ausblenden, **+** wieder anzeigen
+- ✎ Bezeichnung / Einheit fürs OLED (max. 9 Zeichen)
+- 🗑 eigenen Messwert löschen
+
+Die Reihenfolge wird mit **„Reihenfolge speichern“** übernommen, alles andere sofort.
+
+</td>
+</tr>
+<tr>
+<td><img src="images/webapp_einstellungen.jpg" width="200" alt="Einstellungen"></td>
+<td>
+
+**Einstellungen**
+
+Jede Einstellung hat ein **ⓘ** mit Erklärung.
+
+| Einstellung | Standard | Bereich |
 |---|---|---|
-| GET | `/api/live` | Livewerte als JSON |
-| GET | `/api/mwb?group=n` | Messwerteblock |
-| GET | `/api/faults` | Fehlerspeicher-Status |
-| POST | `/api/faults/read`, `/api/faults/clear` | Lesen / Löschen anstoßen |
-| GET | `/api/oled` | OLED-Konfiguration |
-| POST | `/api/oled/save?list=0,1,10` | Reihenfolge |
-| POST | `/api/oled/custom?g=&f=&title=&unit=` | eigenen Messwert anlegen |
-| POST | `/api/oled/delete?slot=` | eigenen Messwert löschen |
-| POST | `/api/oled/unit?id=&n=` | Einheit ändern |
+| Langer Druck (Codeblock) | 3,0 s | 1,0–10,0 s |
+| Diagnose aus / an | 5,0 s | 2,0–20,0 s, mind. 1 s länger als der lange Druck |
+| Spannungskorrektur | 0,00 V | −3,00 bis +3,00 V |
+
+Bei der Spannungskorrektur zeigt die Seite die gerade gemessene Spannung an – einfach mit einem Multimeter an der Batterie vergleichen.
+
+</td>
+</tr>
+<tr>
+<td><img src="images/webapp_fehler.jpg" width="200" alt="Fehlerspeicher"></td>
+<td>
+
+**Fehler**
+
+Fehlerspeicher des Motorsteuergeräts lesen und löschen. Bekannte Fehlercodes erscheinen mit OBD-Code, Klartext, Ursache und Auswirkung; sporadische Fehler sind gelb markiert.
+
+</td>
+</tr>
+</table>
+
+<sub>Screenshots mit Beispielwerten.</sub>
+
+---
+
+## Einstellungen im Code
+
+Was sich nicht in der WebApp einstellen lässt, steht in `CodeBlockSwitchT4.ino` – die meisten Konstanten ganz oben, die Verbrauchswerte in `calculateLitersPerHour()`:
+
+| Konstante | Standard | Bedeutung |
+|---|---|---|
+| `AP_SSID` / `AP_PASS` | `CodeBlockSwitchT4` / `12345678` | WLAN-Hotspot – **Passwort ändern!** |
+| `TESTBENCH_MODE` | `0` | `1` = Fahrzeug wird simuliert (Entwickeln am Schreibtisch) |
+| `R_TOP` / `R_BOTTOM` | 47 : 10 | Verhältnis des Spannungsteilers |
+| `INJECTIONS_PER_REV` | `2.5` | Einspritzungen pro Umdrehung (5-Zylinder; 4-Zylinder = 2.0) |
+| `DIESEL_DENSITY_MG_PER_L` | `832000` | Dieseldichte – zum Kalibrieren des Verbrauchs |
+| `FUEL_AVG_SAMPLES` | `35` | Glättung des aktuellen Verbrauchs |
+| `MEASUREMENT_INTERVAL_MS` | `500` | Messintervall |
+| `DEFAULT_LONG_PRESS_MS` u. a. | – | Standardwerte der WebApp-Einstellungen |
+| Pins (`KLINE_TX`, `OLED_SDA` …) | siehe Stromlaufplan | nur bei anderer Verdrahtung ändern |
+
+Die KWP1281-Zeiten (`FIVE_BAUD_BIT_US`, Timeouts, `KWP_KEEPALIVE_MS`) und `MSG_ADDRESS` kommen aus dem Protokoll und sollten nicht verändert werden.
 
 ---
 
 ## Technische Details
 
+### Projektstruktur
+
+```
+CodeBlockSwitchT4/
+├── CodeBlockSwitchT4.ino        Logik: K-Line, KWP1281, OLED, Taster, Webserver
+├── WebPages.h                   HTML / CSS / JavaScript der WebApp
+├── AppIcon.h                    App-Icon als Byte-Array
+├── FaultTable.h                 Fehlercodes mit Klartext, Ursache, Auswirkung
+├── MwbTable.h                   Titel und Feldnamen der Messwerteblöcke
+├── T4 Codeblock Switcher.stl    Gehäuse (3D-Druck)
+└── images/                      Stromlaufplan, Icon, Screenshots
+```
+
 ### KWP1281-Ablauf
 
-1. 5-Baud-Init der Adresse `0x01` (10 Bit à 200 ms)
-2. MSG antwortet `55 01 8A`, Tester sendet Komplement `75`
-3. Identifikationsblöcke empfangen und mit `09` (ACK) bestätigen; der Codierblock liefert Codierung und WSC
-4. Danach ist der Tester Master
+1. 5-Baud-Init auf Adresse `0x01` (Motorsteuergerät)
+2. Steuergerät antwortet `55 01 8A`, Tester sendet das Komplement
+3. Identifikationsblöcke werden gelesen; der Codierblock liefert Codierung und WSC
+4. Danach fragt das Gerät Messwerteblöcke ab (`0x29`) und hält die Verbindung mit Keep-Alive offen
 
-| Block | Titel | Funktion |
-|---|---|---|
-| `03 ZZ 09 03` | 0x09 | Acknowledge |
-| `03 ZZ 06 03` | 0x06 | Ende |
-| `04 ZZ 29 GG 03` | 0x29 | Messwerteblock lesen → Antwort 0xE7 |
-| `03 ZZ 07 03` | 0x07 | Fehlerspeicher lesen → Antwort 0xFC |
-| `03 ZZ 05 03` | 0x05 | Fehlerspeicher löschen |
-| `07 ZZ 10 PP0..PP3 03` | 0x10 | Codierung schreiben |
+| Block | Funktion |
+|---|---|
+| `0x09` | Acknowledge / Keep-Alive |
+| `0x06` | Verbindung beenden |
+| `0x29` | Messwerteblock lesen → Antwort `0xE7` |
+| `0x07` | Fehlerspeicher lesen → Antwort `0xFC` |
+| `0x05` | Fehlerspeicher löschen |
+| `0x10` | Codierung schreiben (Codeblock), danach wird zur Kontrolle zurückgelesen |
 
-Jedes gesendete Byte erzeugt ein Echo, das verworfen wird; jedes Byte außer ETX (`03`) wird vom Gegenüber komplementiert. Messwerte werden über 70 Kennzahlen (`decodeKwpValue`) umgerechnet.
+### Woher die Werte kommen
+
+| Wert | Quelle |
+|---|---|
+| Drehzahl, Einspritzmenge | MWB 1, Feld 1 und 2 |
+| Geschwindigkeit | MWB 6, Feld 1 |
+| Ladedruck (Überdruck) | MWB 10, Feld 3 − Feld 2 |
+| Bordspannung | eigener ADC am Spannungsteiler |
+| Eigene Messwerte | beliebiger Block / Feld |
+
+Ist die WebApp offen, liest das Gerät alle Werte der OLED-Liste; eigene Messwerte werden reihum aktualisiert (ein Block pro Messzyklus).
 
 ### Verbrauch
 
-$$\text{L/h} = \frac{\text{mg/Hub} \cdot \text{U/min} \cdot 2{,}5 \cdot 60}{832\,000}$$
+$$\text{L/h} = \frac{\text{mg/Hub} \cdot \text{U/min} \cdot 2{,}5 \cdot 60}{832\,000}
+\qquad
+\text{L/100km} = \frac{\text{L/h} \cdot 100}{\text{km/h}}$$
 
-$$\text{L/100km} = \frac{\text{L/h} \cdot 100}{\text{km/h}}$$
+Der aktuelle Verbrauch wird über 35 Werte geglättet und unter 10 km/h als 0,0 angezeigt. Der Fahrt-Durchschnitt zählt in **jedem** Bildschirm mit (ab 4 km/h, Anzeige ab 100 m Strecke) und beginnt nach jedem Neustart bei 0.
 
-Der aktuelle Wert wird über 35 Werte geglättet und unter 10 km/h als 0,0 angezeigt. Der Durchschnitt summiert Liter und Kilometer ab 4 km/h und wird ab 100 m angezeigt. Er liegt nur im RAM.
+### Gespeicherte Daten (Flash)
 
-### Speicher
-
-| Schlüssel | Inhalt |
+| Bereich | Inhalt |
 |---|---|
-| `list` | Reihenfolge der Bildschirme |
-| `custom` | 4 eigene Messwerte (Block, Feld, Titel, Einheit) |
-| `units` | Einheiten der 6 festen Bildschirme |
+| `oled` | Reihenfolge der Bildschirme, eigene Messwerte, Einheiten |
+| `cfg` | Einstellungen aus der WebApp |
+| `diag` | Diagnose aus / an |
 
-Ändert sich die Struktur `CustomScreen`, werden alte eigene Messwerte nach dem Flashen verworfen und müssen neu angelegt werden.
+### API
+
+| Methode | Pfad | Funktion |
+|---|---|---|
+| GET | `/api/live` | Werte aller ausgewählten Bildschirme, Codeblock, Status |
+| GET | `/api/mwb?group=n` | Messwerteblock lesen |
+| GET | `/api/faults` | Status Fehlerspeicher |
+| POST | `/api/faults/read` · `/api/faults/clear` | Lesen / Löschen anstoßen |
+| GET | `/api/oled` | OLED-Konfiguration |
+| POST | `/api/oled/save?list=0,2,10` | Reihenfolge speichern |
+| POST | `/api/oled/custom?g=&f=&title=&unit=` | eigenen Messwert anlegen |
+| POST | `/api/oled/delete?slot=` | eigenen Messwert löschen |
+| POST | `/api/oled/unit?id=&n=` | Bezeichnung / Einheit ändern |
+| GET | `/api/settings` | Einstellungen lesen |
+| POST | `/api/settings/save?lp=&dp=&vo=` | Einstellungen speichern |
+| POST | `/api/codeblock?to=2\|3` | Codeblock schreiben |
+| POST | `/api/codeblock/ack` | Meldung „Zündungswechsel“ bestätigen |
 
 ---
 
@@ -270,25 +379,27 @@ Der aktuelle Wert wird über 35 Werte geglättet und unter 10 km/h als 0,0 angez
 | Problem | Ursache / Lösung |
 |---|---|
 | Keine Ausgabe im seriellen Monitor | „USB CDC On Boot: Enabled“ setzen |
-| `Kein Synchronisationsbyte` | Zündung an? K-Line an OBD 7? 510-Ω-Pull-up? Masse gemeinsam? |
-| `Erwartetes Keyword 01 8A fehlt` | anderes Protokoll (KWP2000/CAN) – nicht unterstützt |
+| Arduino IDE öffnet den Sketch nicht | Ordnername und `.ino`-Name müssen gleich sein |
+| `Kein Synchronisationsbyte` | Zündung an? K-Line an OBD 7? R1 (510 Ω) vorhanden? Gemeinsame Masse? |
+| `Erwartetes Keyword 01 8A fehlt` | Steuergerät spricht kein KWP1281 (z. B. KWP2000 / CAN) |
 | Echo-Warnungen | TX/RX vertauscht oder VCC am L9637D fehlt |
-| Blockzähler-Fehler | Timing; `TESTER_RESPONSE_DELAY_MS` leicht erhöhen |
-| WLAN instabil | `WIFI_POWER_8_5dBm` beibehalten, Antenne frei halten |
-| ESP startet nicht | Taster (GPIO9) beim Einschalten gedrückt |
-| Spannung falsch | Widerstände im Code anpassen, `voltageOffset` kalibrieren |
-| `'..._HTML' was not declared` | `WebPages.h` fehlt im Sketch-Ordner |
+| WebApp lädt nicht | Mit dem WLAN des Geräts verbunden? Mobile Daten aus? Adresse `http://192.168.4.1` |
+| WLAN instabil | Sendeleistung ist bewusst reduziert; Antenne des ESP32 frei halten |
+| ESP32 startet nicht | Taster (GPIO9) beim Einschalten gedrückt |
+| Spannung weicht ab | In der WebApp unter Einstellungen die Spannungskorrektur anpassen |
+| Codeblock schreiben schlägt fehl | Zündung an? Diagnose an? Ein anderes Diagnosegerät gleichzeitig angeschlossen? |
 | „Sketch too big“ | Partition „Huge APP“ wählen |
 
-Zum Testen ohne Auto: `#define TESTBENCH_MODE 1`.
+Zum Testen ohne Fahrzeug: `#define TESTBENCH_MODE 1`.
 
 ---
 
 ## Sicherheitshinweise
 
-- **Codierung schreiben** verändert das Steuergerät. Vorher die Originalcodierung notieren. Nur Codierungen schreiben, die für Motor und Getriebe zulässig sind.
+- **Codeblock schreiben verändert das Steuergerät.** Vorher die Originalcodierung notieren und nur Codierungen schreiben, die zu Motor und Getriebe passen.
+- Der Codeblock lässt sich in der WebApp auch während der Fahrt umschalten. Bedienung nur durch den Beifahrer; die neue Leistung ist erst nach einem Zündungswechsel im Stand aktiv.
+- **WLAN-Passwort ändern** – sonst kann jeder in Funkreichweite den Codeblock ändern oder den Fehlerspeicher löschen.
 - Leistungsänderungen können Betriebserlaubnis, Versicherung und Garantie betreffen.
-- Gerät nicht während der Fahrt bedienen.
-- OBD-Pin 16 führt Dauerplus: Gerät beim Abstellen abziehen oder Ruhestrom beachten.
-- Fehlerspeicher löschen beseitigt keine Ursache.
+- OBD-Pin 16 führt Dauerplus: Gerät bei längerer Standzeit abziehen.
+- Fehlerspeicher löschen beseitigt nicht die Ursache.
 - Nutzung auf eigene Verantwortung.

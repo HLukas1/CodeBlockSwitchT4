@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="230" viewBox="0 0 1100 230" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="1100" height="230" fill="#ffffff"/>
+<text x="88" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">Spannung</text>
+<rect x="20" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="24" y="46" width="128" height="96" fill="#000"/>
+<text x="88" y="104" font-size="26" text-anchor="middle" fill="#e8f4ff">14.1 V</text>
+<text x="240" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">Ladedruck</text>
+<rect x="172" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="176" y="46" width="128" height="96" fill="#000"/>
+<text x="240" y="102" font-size="27" font-weight="bold" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">842</text>
+<text x="240" y="128" font-size="13" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">mBar</text>
+<text x="392" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">Verbrauch</text>
+<rect x="324" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="328" y="46" width="128" height="96" fill="#000"/>
+<text x="392" y="102" font-size="27" font-weight="bold" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">8.6</text>
+<text x="392" y="128" font-size="13" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">L/100km</text>
+<text x="544" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">Durchschnitt</text>
+<rect x="476" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="480" y="46" width="128" height="96" fill="#000"/>
+<text x="544" y="102" font-size="27" font-weight="bold" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">9.3</text>
+<text x="544" y="128" font-size="13" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">AVG L/100</text>
+<text x="696" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">★ Eigener Wert</text>
+<rect x="628" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="632" y="46" width="128" height="96" fill="#000"/>
+<text x="696" y="102" font-size="27" font-weight="bold" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">87.0</text>
+<text x="696" y="128" font-size="13" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">C</text>
+<text x="848" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">Codeblock</text>
+<rect x="780" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="784" y="46" width="128" height="96" fill="#000"/>
+<text x="848" y="72" font-size="13" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">CB: 3</text>
+<text x="848" y="106" font-size="26" font-weight="bold" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">138PS</text>
+<text x="1000" y="30" font-size="13" font-weight="600" text-anchor="middle" fill="#1b1f24">Diagnose aus</text>
+<rect x="932" y="42" width="136" height="104" rx="10" fill="#1b1f24"/>
+<rect x="936" y="46" width="128" height="96" fill="#000"/>
+<text x="1000" y="102" font-size="27" font-weight="bold" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">Diag</text>
+<text x="1000" y="128" font-size="13" text-anchor="middle" fill="#e8f4ff" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">aus</text>
+<line x1="20" y1="168" x2="1080" y2="168" stroke="#d0d7de"/>
+<text x="550" y="194" font-size="13.5" text-anchor="middle" fill="#57606a">Kurz drücken: nächster Bildschirm (Reihenfolge frei wählbar) · nach dem letzten folgt der Codeblock</text>
+<text x="550" y="216" font-size="13.5" text-anchor="middle" fill="#57606a">Lang drücken im Codeblock: 102 ↔ 138 PS · Sehr lang drücken im Spannungsbildschirm: Diagnose aus/an</text>
+</svg>
