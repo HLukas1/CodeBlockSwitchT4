@@ -10,6 +10,13 @@
   ESP32-C3 · K-Line (KWP1281) · eigener WLAN-Hotspot · keine App, kein Internet nötig
 </p>
 
+<p align="center">
+  <img src="images/geraet_eingebaut.jpg" height="420" alt="Eingebaut im T4-Armaturenbrett">
+  &nbsp;
+  <a href="images/demo.mp4"><img src="images/demo.gif" height="420" alt="Bildschirme durchschalten (Video)"></a>
+</p>
+<p align="center"><sub>Eingebaut im Armaturenbrett · Bildschirme per Taster durchschalten (antippen für das Video)</sub></p>
+
 > [!IMPORTANT]
 > **Die Leistungsänderung funktioniert nur mit einer angepassten Motorsoftware.** Das Gerät schaltet lediglich die Codierung des Motorsteuergeräts zwischen 2 und 3 um. Mehr Leistung gibt es nur, wenn auf dem Steuergerät eine Software läuft, die für beide Codierungen ein eigenes Kennfeld hat. Mit der Serien-Software ändert sich an der Leistung nichts.
 
@@ -310,7 +317,7 @@ CodeBlockSwitchT4/
 ├── FaultTable.h                 Fehlercodes mit Klartext, Ursache, Auswirkung
 ├── MwbTable.h                   Titel und Feldnamen der Messwerteblöcke
 ├── T4 Codeblock Switcher.stl    Gehäuse (3D-Druck)
-└── images/                      Stromlaufplan, Icon, Screenshots
+└── images/                      Stromlaufplan, Icon, Screenshots, Foto und Video
 ```
 
 ### KWP1281-Ablauf
