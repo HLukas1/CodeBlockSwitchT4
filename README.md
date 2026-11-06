@@ -10,6 +10,9 @@
   ESP32-C3 · K-Line (KWP1281) · eigener WLAN-Hotspot · keine App, kein Internet nötig
 </p>
 
+> [!IMPORTANT]
+> **Die Leistungsänderung funktioniert nur mit einer angepassten Motorsoftware.** Das Gerät schaltet lediglich die Codierung des Motorsteuergeräts zwischen 2 und 3 um. Mehr Leistung gibt es nur, wenn auf dem Steuergerät eine Software läuft, die für beide Codierungen ein eigenes Kennfeld hat. Mit der Serien-Software ändert sich an der Leistung nichts.
+
 <p align="center">
   <img src="images/webapp_live.jpg" width="200" alt="Live">
   <img src="images/webapp_messwerte.jpg" width="200" alt="Messwerte">
@@ -44,7 +47,7 @@ Der CodeBlockSwitchT4 steckt in der OBD-Buchse, spricht über die K-Line mit dem
 | 📟 **OLED-Anzeige** | Bordspannung, Ladedruck, aktueller Verbrauch, Fahrt-Durchschnitt und beliebig viele eigene Messwerte, per Taster durchschalten |
 | 📱 **WebApp** | Alle ausgewählten Werte live auf dem Handy, dazu Messwerteblöcke, Fehlerspeicher, OLED-Konfiguration und Einstellungen |
 | 🧩 **Voll modular** | Jedes Feld aus jedem Messwerteblock (1–255) lässt sich als eigener Wert auf OLED und Handy legen |
-| ⚡ **Codeblock 2 ↔ 3** | 102 PS ↔ 138 PS per langem Tastendruck oder in der WebApp, der WSC bleibt erhalten |
+| ⚡ **Codeblock 2 ↔ 3** | 102 PS ↔ 138 PS per langem Tastendruck oder in der WebApp, der WSC bleibt erhalten – **nur mit angepasster Motorsoftware** |
 | 🔧 **Fehlerspeicher** | Lesen und Löschen mit Klartext, Ursache und Auswirkung; beim Start automatischer Check (`! n FSP`) |
 | ⛽ **Verbrauch** | Aktueller Verbrauch in L/100 km und Fahrt-Durchschnitt, berechnet aus Einspritzmenge, Drehzahl und Geschwindigkeit |
 | 🔌 **Diagnose aus** | K-Line auf Knopfdruck freigeben, z. B. für VCDS, ohne das Gerät abzuziehen |
@@ -208,7 +211,7 @@ Beim Einschalten erscheint das Startlogo, dann wird einmal der Fehlerspeicher ge
 
 Zeigt genau die Werte, die unter **OLED** ausgewählt sind – in derselben Reihenfolge und mit deinen Bezeichnungen. Der Wert, der gerade am Gerät zu sehen ist, ist blau markiert.
 
-Darunter steht der aktive **Codeblock** (102 PS / 138 PS) mit einem Knopf zum Umschalten. Nach dem Schreiben erscheint **„Bitte Zündungswechsel durchführen“** – die neue Leistung ist erst nach Zündung aus/an aktiv.
+Darunter steht der aktive **Codeblock** (102 PS / 138 PS) mit einem Knopf zum Umschalten. Nach dem Schreiben erscheint **„Bitte Zündungswechsel durchführen“** – die neue Leistung ist erst nach Zündung aus/an aktiv. Eine Leistungsänderung gibt es nur mit angepasster Motorsoftware.
 
 </td>
 </tr>
@@ -397,6 +400,7 @@ Zum Testen ohne Fahrzeug: `#define TESTBENCH_MODE 1`.
 ## Sicherheitshinweise
 
 - **Codeblock schreiben verändert das Steuergerät.** Vorher die Originalcodierung notieren und nur Codierungen schreiben, die zu Motor und Getriebe passen.
+- **Mehr Leistung nur mit angepasster Motorsoftware:** Der Codeblock wählt nur zwischen zwei Kennfeldern, die die Software auf dem Steuergerät bereitstellen muss. Mit der Serien-Software bewirkt die Umschaltung keine Leistungsänderung.
 - Der Codeblock lässt sich in der WebApp auch während der Fahrt umschalten. Bedienung nur durch den Beifahrer; die neue Leistung ist erst nach einem Zündungswechsel im Stand aktiv.
 - **WLAN-Passwort ändern** – sonst kann jeder in Funkreichweite den Codeblock ändern oder den Fehlerspeicher löschen.
 - Leistungsänderungen können Betriebserlaubnis, Versicherung und Garantie betreffen.
