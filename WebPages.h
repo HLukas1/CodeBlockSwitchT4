@@ -80,7 +80,7 @@ button:disabled{opacity:.45;cursor:wait}
 .ctl .u{width:22px;color:var(--muted);font-size:14px}
 .meta{font-size:12px;color:var(--faint);margin-top:8px}
 .meta b{color:var(--muted);font-weight:600}
-.cbcard{display:flex;align-items:center;gap:14px;margin-top:10px}
+.cbcard{display:flex;align-items:center;gap:14px;grid-column:1/-1}
 .cbcard>div{flex:1;min-width:0}
 .cbcard .lbl{padding:0;display:flex;align-items:center;gap:7px}
 .cbcard .badge{position:static}
@@ -90,6 +90,14 @@ button:disabled{opacity:.45;cursor:wait}
 .dlg{width:100%;max-width:360px;background:var(--surface2);border:1px solid var(--line2);border-radius:var(--r);padding:22px;text-align:center}
 .dlg h3{margin:0;font-size:19px;font-weight:720;letter-spacing:-.01em}
 .dlg p{margin:10px 0 18px;font-size:14px;color:#c3cedb}
+.grp{margin-top:18px}
+.grp-h{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:0 2px 8px}
+.grp-h b{font-size:15px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid var(--line);font-size:14px}
+.kv:first-child{border-top:0}
+.kv b{font-weight:650;white-space:nowrap}
+.kv b.dim{color:var(--faint);font-weight:500}
+.ecu{display:block;width:100%;height:48px;margin-top:16px;padding:0 14px;font:inherit;font-size:15px;font-weight:620;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:12px}
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:10;background:rgba(12,17,24,.94);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 nav.tabs div{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(5,1fr)}
 nav.tabs a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 2px 10px;color:var(--faint);text-decoration:none;font-size:10.5px;font-weight:620}
@@ -112,6 +120,23 @@ const char APP_MANIFEST[] PROGMEM = R"rawliteral({"name":"CodeBlockSwitchT4","sh
 <script>document.querySelectorAll('nav.tabs a').forEach(a=>{if(a.dataset.p===location.pathname)a.className='act'})</script>
 )rawliteral"
 
+// Steuergeräte-Auswahl für den Fehlerspeicher (laut Autoscan,
+// alle über K-Line mit KW1281). Adresse in Hex wie in VCDS.
+#define ECU_JS R"rawliteral(
+<script>
+const ECUS=[['01','Motorelektronik'],['03','Bremse'],['08','Climatronic'],['15','Airbag'],['17','Kombiinstrument'],['19','Gateway']];
+let ecu='01';
+try{const s=localStorage.getItem('ecu');if(ECUS.some(e=>e[0]===s))ecu=s;}catch(e){}
+function ecuName(a){const e=ECUS.find(x=>x[0]===a);return e?e[1]:'Adresse '+a;}
+function ecuSelect(onChange){
+  const sel=document.getElementById('ecu');
+  ECUS.forEach(([a,n])=>{const o=document.createElement('option');o.value=a;o.textContent=a+' – '+n;sel.appendChild(o);});
+  sel.value=ecu;
+  sel.onchange=()=>{ecu=sel.value;try{localStorage.setItem('ecu',ecu);}catch(e){}onChange();};
+}
+</script>
+)rawliteral"
+
 #define HEAD_HTML(title) R"rawliteral(<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -125,7 +150,7 @@ const char APP_MANIFEST[] PROGMEM = R"rawliteral({"name":"CodeBlockSwitchT4","sh
 <link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="manifest" href="/manifest.json">
-<link rel="stylesheet" href="/app.css?v=4">
+<link rel="stylesheet" href="/app.css?v=8">
 <title>)rawliteral" title R"rawliteral(</title>
 </head>
 )rawliteral"
@@ -139,14 +164,6 @@ const char INDEX_HTML[] PROGMEM = HEAD_HTML("T4 Live") R"rawliteral(
 <main>
 <div class="note warn" id="diag" hidden>Diagnose ist aus – die K-Line ist frei. Zum Einschalten am Gerät im Spannungsbildschirm lange drücken.</div>
 <div class="grid" id="grid"></div>
-<div class="card cbcard" id="cb">
-  <div>
-    <div class="lbl">Codeblock<span class="badge" id="cbBadge" hidden>OLED</span></div>
-    <div class="val dim" id="cbVal">-</div>
-    <div class="unit" id="cbPs">&nbsp;</div>
-  </div>
-  <button class="btn pri" id="cbBtn" hidden></button>
-</div>
 <div class="note warn" id="cbErr" hidden></div>
 <p class="hint">Welche Werte hier erscheinen, legst du unter <b>OLED</b> fest. <span style="color:var(--accent)">OLED</span> markiert den Wert, der gerade am Gerät angezeigt wird.</p>
 </main>
@@ -164,7 +181,7 @@ const $=id=>document.getElementById(id);
 const PS={2:'102 PS',3:'138 PS'};
 let sig='',coding=0,cbWait=false,cbPosted=0,ackDone=0;
 
-$('cbBtn').onclick=async()=>{
+const cbClick=async()=>{
   const to=coding===2?3:2;
   if(!confirm('Auf '+PS[to]+' umschalten?'))return;
   cbWait=true;cbPosted=Infinity;
@@ -188,19 +205,22 @@ function showCb(d,t0){
   if(cbWait&&t0>=cbPosted)cbWait=false;
   coding=d.coding;
   const known=coding===2||coding===3;
-  const v=$('cbVal');
-  v.textContent=known?PS[coding]:(coding?coding:'-');
-  v.className='val'+(coding?'':' dim');
-  $('cbPs').hidden=known;
-  $('cbPs').textContent=coding?'Unbekannte Codierung':'Noch nicht gelesen';
-  $('cb').classList.toggle('on',d.cb);
-  $('cbBadge').hidden=!d.cb;
-  const b=$('cbBtn');
-  b.hidden=!known||!d.diag;
-  b.disabled=cbWait;
-  if(cbWait)b.textContent='Schreibe …';
-  else if(known)b.textContent=PS[coding===2?3:2];
-  if(!cbWait){$('cbErr').hidden=!d.cbErr;$('cbErr').textContent=d.cbErr;}
+  const shown=!!$('cb');
+  if(shown){
+    const v=$('cbVal');
+    v.textContent=known?PS[coding]:(coding?coding:'-');
+    v.className='val'+(coding?'':' dim');
+    $('cbPs').hidden=known;
+    $('cbPs').textContent=coding?'Unbekannte Codierung':'Noch nicht gelesen';
+    $('cb').classList.toggle('on',d.cb);
+    $('cbBadge').hidden=!d.cb;
+    const b=$('cbBtn');
+    b.hidden=!known||!d.diag;
+    b.disabled=cbWait;
+    if(cbWait)b.textContent='Schreibe …';
+    else if(known)b.textContent=PS[coding===2?3:2];
+  }
+  if(!cbWait){$('cbErr').hidden=!shown||!d.cbErr;$('cbErr').textContent=d.cbErr;}
   if(t0>=ackDone){
     $('cycle').hidden=!d.cbCycle;
     if(d.cbCycle)$('cycleP').textContent=(known?PS[coding]:'Codeblock '+coding)+' wurde geschrieben. Zündung aus- und wieder einschalten, damit die Änderung wirksam wird.';
@@ -211,9 +231,15 @@ function build(items){
   grid.innerHTML='';
   items.forEach(it=>{
     const c=document.createElement('div');
-    c.className='card';c.id='c'+it.id;
-    c.innerHTML='<div class="lbl"></div><div class="val">-</div><div class="unit"></div><span class="badge" hidden>OLED</span>';
-    c.querySelector('.lbl').textContent=it.id>=10?'★ '+it.n:it.n;
+    if(it.id===6){
+      c.className='card cbcard';c.id='cb';
+      c.innerHTML='<div><div class="lbl">Codeblock<span class="badge" id="cbBadge" hidden>OLED</span></div><div class="val dim" id="cbVal">-</div><div class="unit" id="cbPs">&nbsp;</div></div><button class="btn pri" id="cbBtn" hidden></button>';
+      c.querySelector('#cbBtn').onclick=cbClick;
+    }else{
+      c.className='card';c.id='c'+it.id;
+      c.innerHTML='<div class="lbl"></div><div class="val">-</div><div class="unit"></div><span class="badge" hidden>OLED</span>';
+      c.querySelector('.lbl').textContent=it.id>=10?'★ '+it.n:it.n;
+    }
     grid.appendChild(c);
   });
 }
@@ -222,11 +248,12 @@ async function upd(){
   try{
     const t0=Date.now();
     const d=await (await fetch('/api/live',{cache:'no-store'})).json();
-    showCb(d,t0);
     const s=d.items.map(i=>i.id+i.n).join('|');
     if(s!==sig){sig=s;build(d.items);}
+    showCb(d,t0);
 
     d.items.forEach(it=>{
+      if(it.id===6)return;
       const c=document.getElementById('c'+it.id);
       const ok=!it.k||d.connected;
       const v=c.querySelector('.val');
@@ -335,27 +362,48 @@ upd();
 // =====================================================
 const char FAULT_HTML[] PROGMEM = HEAD_HTML("Fehlerspeicher") R"rawliteral(
 <body>
-<header><div class="hd"><div><h1>Fehlerspeicher</h1><div class="sub">Motorsteuergerät (Adresse 01)</div></div><span class="pill" id="st">…</span></div></header>
+<header><div class="hd"><div><h1>Fehlerspeicher</h1><div class="sub" id="sub">Motorelektronik (Adresse 01)</div></div><span class="pill" id="st">…</span></div></header>
 <main>
+<select id="ecu" class="ecu" aria-label="Steuergerät"></select>
 <div class="btns">
   <button class="btn pri" id="rb">Fehler lesen</button>
   <button class="btn dan" id="cb">Fehler löschen</button>
 </div>
 <div class="note" id="msg">Noch nicht gelesen</div>
+<button class="btn" id="dl" style="margin-top:10px" hidden>Bericht herunterladen (HTML)</button>
 <h2>Einträge</h2>
 <div id="list"></div>
 </main>
-)rawliteral" NAV_HTML R"rawliteral(
+)rawliteral" NAV_HTML ECU_JS R"rawliteral(
 <script>
 const st=document.getElementById('st'),msg=document.getElementById('msg'),list=document.getElementById('list'),rb=document.getElementById('rb'),cb=document.getElementById('cb');
+const sub=document.getElementById('sub'),dl=document.getElementById('dl');
+const ALL='ALL';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let scanning=false,results=[],scanTime=null;
+// Letztes Ergebnis bei einem einzelnen Steuergerät (für den Bericht)
+let single=null,singleTime=null,wasRunning=false;
 
-function btn(dis){rb.disabled=dis;cb.disabled=dis;}
+ecuSelect(()=>{
+  list.innerHTML='';
+  if(ecu===ALL)renderAll();
+  else{msg.textContent='Noch nicht gelesen';dl.hidden=true;}
+});
+// Zusätzlicher Eintrag: alle Steuergeräte nacheinander auslesen
+(function(){
+  const sel=document.getElementById('ecu');
+  const o=document.createElement('option');o.value=ALL;o.textContent='Alle Steuergeräte';sel.appendChild(o);
+  try{if(localStorage.getItem('ecu')===ALL){ecu=ALL;sel.value=ALL;}}catch(e){}
+})();
+
+function btn(dis){rb.disabled=dis;cb.disabled=dis||ecu===ALL;}
 
 async function cmd(a){
-  if(a==='clear'&&!confirm('Fehlerspeicher wirklich löschen?'))return;
+  if(ecu===ALL){if(a==='read')scanAll();return;}
+  if(a==='clear'&&!confirm('Fehlerspeicher von '+ecuName(ecu)+' wirklich löschen?'))return;
   btn(true);
   msg.textContent=a==='read'?'Lese Fehlerspeicher …':'Lösche Fehlerspeicher …';
-  try{await fetch('/api/faults/'+a,{method:'POST',cache:'no-store'});}
+  try{await fetch('/api/faults/'+a+'?addr='+ecu,{method:'POST',cache:'no-store'});}
   catch(e){msg.textContent='Anforderung fehlgeschlagen';btn(false);}
 }
 rb.onclick=()=>cmd('read');
@@ -378,18 +426,209 @@ function card(f){
   return c;
 }
 
-async function upd(){
+// ---------- Alle Steuergeräte ----------
+
+// Ein Steuergerät lesen und auf das Ergebnis warten
+async function readOne(a){
+  for(let t=0;t<20;t++){
+    try{const r=await fetch('/api/faults/read?addr='+a,{method:'POST',cache:'no-store'});if(r.status!==409)break;}catch(e){}
+    await sleep(700);
+  }
+  for(let i=0;i<150;i++){
+    await sleep(600);
+    try{
+      const d=await (await fetch('/api/faults?addr='+a,{cache:'no-store'})).json();
+      if(!d.running&&d.addr===a)return d;
+    }catch(e){}
+  }
+  return {addr:a,valid:false,error:true,status:'Keine Antwort (Zeitüberschreitung)',faults:[],ident:''};
+}
+
+function summary(items){
+  const total=items.reduce((s,r)=>s+(r.d.valid?r.d.faults.length:0),0);
+  const bad=items.filter(r=>!r.d.valid).length;
+  if(items.length===1)return bad?'nicht erreichbar':total+' Fehler';
+  return total+' Fehler in '+items.length+' Steuergeräten'+(bad?', '+bad+' nicht erreichbar':'');
+}
+
+function renderAll(){
+  list.innerHTML='';
+  sub.textContent='Alle Steuergeräte ('+ECUS.length+')';
+  if(!results.length){
+    if(!scanning)msg.textContent='Liest alle '+ECUS.length+' Steuergeräte nacheinander. Das erste Mal kann es einige Minuten dauern.';
+    dl.hidden=true;return;
+  }
+  results.forEach(r=>{
+    const g=document.createElement('div');g.className='grp';
+    const h=document.createElement('div');h.className='grp-h';
+    const b=document.createElement('b');b.textContent=r.a+' – '+r.n;h.appendChild(b);
+    const p=document.createElement('span');
+    const n=r.d.valid?r.d.faults.length:-1;
+    p.className='pill '+(n<0?'err':(n?'run':'ok'));
+    p.textContent=n<0?'nicht erreichbar':(n?n+' Fehler':'kein Fehler');
+    h.appendChild(p);g.appendChild(h);
+    if(r.d.ident){const i=document.createElement('div');i.className='meta';i.style.margin='-4px 2px 8px';i.textContent=r.d.ident;g.appendChild(i);}
+    if(n<0){const e=document.createElement('div');e.className='note warn';e.style.marginTop='0';e.textContent=r.d.status;g.appendChild(e);}
+    else r.d.faults.forEach(f=>g.appendChild(card(f)));
+    list.appendChild(g);
+  });
+  if(!scanning){msg.textContent='Fertig: '+summary(results);dl.hidden=false;}
+}
+
+async function scanAll(){
+  scanning=true;results=[];scanTime=null;btn(true);dl.hidden=true;list.innerHTML='';
+  st.textContent='läuft …';st.className='pill run';
+  for(let i=0;i<ECUS.length;i++){
+    const [a,n]=ECUS[i];
+    msg.textContent='Lese '+a+' – '+n+' ('+(i+1)+'/'+ECUS.length+') …';
+    const d=await readOne(a);
+    results.push({a,n,d});
+    renderAll();
+    msg.textContent=i+1<ECUS.length?'Lese weiter …':msg.textContent;
+  }
+  scanning=false;scanTime=new Date();
+  renderAll();
+  st.textContent='Fertig';st.className='pill ok';
+  btn(false);
+}
+
+// ---------- HTML-Bericht ----------
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+// Bericht als eigenständige HTML-Datei (hell, druckbar)
+// items: [{a,n,d}], all: Gesamtauszug oder einzelnes Steuergerät
+function report(items,t,all,icon){
+  const z=n=>String(n).padStart(2,'0');
+  const day=t.toLocaleDateString('de-DE',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  const time=z(t.getHours())+':'+z(t.getMinutes())+':'+z(t.getSeconds());
+  const iso=t.getFullYear()+'-'+z(t.getMonth()+1)+'-'+z(t.getDate())+' '+time;
+  const title=all?'Gesamtauszug':items[0].a+' – '+items[0].n;
+  const fw=(items.find(r=>r.d.fw)||{d:{}}).d.fw||'';
+  const total=items.reduce((s,r)=>s+(r.d.valid?r.d.faults.length:0),0);
+  const bad=items.filter(r=>!r.d.valid).length;
+  const clean=items.filter(r=>r.d.valid&&!r.d.faults.length).length;
+
+  const badge=r=>!r.d.valid?'<span class="b na">nicht erreichbar</span>'
+    :(r.d.faults.length?`<span class="b err">${r.d.faults.length} Fehler</span>`:'<span class="b ok">kein Fehler</span>');
+
+  const fault=f=>`<div class="f${f.sporadic?' sp':''}">
+<div class="fh"><span class="code">${esc(f.code)}</span>${f.known&&f.obd?`<span class="obd">${esc(f.obd)}</span>`:''}<span class="b ${f.sporadic?'warn':'err'}">${f.sporadic?'sporadisch':'statisch'}</span></div>
+<div class="ft">${esc(f.known?f.title:'Fehlercode nicht in der Tabelle hinterlegt')}</div>
+<div class="fa">${f.text?esc(f.text)+' · ':''}Fehlerart ${parseInt(f.typeHex,16)&127} (0x${esc(f.typeHex)}) · Fehlerort 0x${esc(f.hex)}</div>
+${f.known?`<div class="ce"><div><span>Ursache</span>${esc(f.cause)}</div><div><span>Auswirkung</span>${esc(f.effect)}</div></div>`:''}
+</div>`;
+
+  const ecu=r=>`<section class="ecu">
+<div class="eh"><span class="adr">${esc(r.a)}</span><div class="en"><b>${esc(r.n)}</b>${r.d.ident?`<code>${esc(r.d.ident)}</code>`:''}</div>${badge(r)}</div>
+${!r.d.valid?`<p class="msg">${esc(r.d.status||'Keine Verbindung')}</p>`
+  :(r.d.faults.length?r.d.faults.map(fault).join(''):'<p class="msg ok">Im Fehlerspeicher ist kein Fehler eingetragen.</p>')}
+</section>`;
+
+  const overview=all?`<table><thead><tr><th>Adresse</th><th>Steuergerät</th><th>Ergebnis</th></tr></thead><tbody>
+${items.map(r=>`<tr><td><span class="adr s">${esc(r.a)}</span></td><td>${esc(r.n)}</td><td>${badge(r)}</td></tr>`).join('')}
+</tbody></table>`:'';
+
+  const css=`*{box-sizing:border-box}
+body{margin:0;background:#f3f5f8;color:#1b2430;font:15px/1.5 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.page{max-width:860px;margin:0 auto;padding:28px 18px 40px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap;background:#0d1520;color:#fff;border-radius:16px;padding:22px 24px}
+.brand{display:flex;align-items:center;gap:14px}.brand img{width:52px;height:52px;border-radius:12px}
+.app{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#8fb8dc}
+h1{margin:2px 0 0;font-size:24px;letter-spacing:-.01em}
+.stamp{text-align:right;margin-left:auto}.stamp span{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#8fb8dc}
+.stamp b{display:block;font-size:16px}.stamp .tm{font-size:22px;font-variant-numeric:tabular-nums}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}
+.tile{background:#fff;border:1px solid #dfe4ea;border-radius:12px;padding:12px 14px}
+.tile span{display:block;font-size:12px;color:#5b6676}.tile b{font-size:24px;font-variant-numeric:tabular-nums}
+.tile.err b{color:#c62828}.tile.ok b{color:#1a7f37}.tile.na b{color:#8a5a00}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #dfe4ea;border-radius:12px;overflow:hidden;margin-bottom:16px}
+th,td{text-align:left;padding:9px 14px;border-bottom:1px solid #edf0f3;font-size:14px}th{font-size:12px;color:#5b6676;text-transform:uppercase;letter-spacing:.06em;background:#f8f9fb}
+tr:last-child td{border-bottom:0}
+.ecu{background:#fff;border:1px solid #dfe4ea;border-radius:14px;padding:16px 18px;margin-bottom:12px;break-inside:avoid}
+.eh{display:flex;align-items:center;gap:12px}.en{flex:1;min-width:0}.en b{display:block;font-size:17px}
+.en code{font:12px ui-monospace,Menlo,Consolas,monospace;color:#5b6676}
+.adr{display:inline-grid;place-items:center;min-width:42px;height:42px;border-radius:10px;background:#e8f1fb;color:#0b5cad;font:700 16px ui-monospace,Menlo,Consolas,monospace}
+.adr.s{min-width:34px;height:28px;font-size:13px;border-radius:7px}
+.b{display:inline-block;white-space:nowrap;font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px}
+.b.ok{background:#e6f4ea;color:#1a7f37}.b.err{background:#fdecec;color:#c62828}.b.warn{background:#fff4dc;color:#8a5a00}.b.na{background:#eef0f3;color:#5b6676}
+.msg{margin:12px 0 0;color:#5b6676}.msg.ok{color:#1a7f37}
+.f{margin-top:12px;border:1px solid #f1d3d3;border-left:4px solid #c62828;border-radius:10px;padding:12px 14px;background:#fffafa;break-inside:avoid}
+.f.sp{border-color:#f0e0bb;border-left-color:#d49100;background:#fffcf4}
+.fh{display:flex;align-items:center;gap:8px}.code{font:700 20px ui-monospace,Menlo,Consolas,monospace}
+.obd{font:600 13px ui-monospace,Menlo,Consolas,monospace;color:#0b5cad}.fh .b{margin-left:auto}
+.ft{font-weight:650;margin-top:4px}.fa{font-size:13px;color:#5b6676}
+.ce{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.ce div{font-size:14px}
+.ce span{display:block;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#5b6676}
+footer{margin-top:22px;font-size:12px;color:#7a8594;text-align:center}
+@media(max-width:600px){.tiles{grid-template-columns:repeat(2,1fr)}.ce{grid-template-columns:1fr}.stamp{text-align:left;margin-left:0}}
+@media print{body{background:#fff}.page{padding:0}.top{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+
+  return `<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fehlerspeicher – ${esc(title)} – ${esc(iso)}</title><style>${css}</style></head><body><div class="page">
+<div class="top"><div class="brand">${icon?`<img src="${icon}" alt="">`:''}<div><div class="app">CodeBlockSwitchT4 · Fehlerspeicher</div><h1>${esc(title)}</h1></div></div>
+<div class="stamp"><span>Ausgelesen am</span><b>${esc(day)}</b><b class="tm">${time} Uhr</b></div></div>
+<div class="tiles"><div class="tile"><span>Steuergeräte</span><b>${items.length}</b></div><div class="tile ${total?'err':'ok'}"><span>Fehler</span><b>${total}</b></div><div class="tile ok"><span>ohne Fehler</span><b>${clean}</b></div><div class="tile ${bad?'na':''}"><span>nicht erreichbar</span><b>${bad}</b></div></div>
+${overview}
+${items.map(ecu).join('')}
+<footer>Erstellt mit CodeBlockSwitchT4${fw?' · Firmware '+esc(fw):''} · Zeitstempel ${esc(iso)}</footer>
+</div></body></html>`;
+}
+
+// App-Icon als Data-URL für den Bericht (fehlt es, ohne Icon)
+async function iconData(){
   try{
-    const d=await (await fetch('/api/faults',{cache:'no-store'})).json();
-    msg.textContent=d.status;
+    const b=await (await fetch('/icon.png')).blob();
+    return await new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>res('');r.readAsDataURL(b);});
+  }catch(e){return '';}
+}
+
+dl.onclick=async()=>{
+  const all=ecu===ALL;
+  if(!all&&!single)return;
+  const items=all?results:[single];
+  const t=(all?scanTime:singleTime)||new Date(),z=n=>String(n).padStart(2,'0');
+  // Dateiname: Gesamtauszug oder Adresse + Steuergerät
+  const what=all?'Gesamtauszug':single.a+'_'+single.n.replace(/[^A-Za-z0-9ÄÖÜäöüß-]+/g,'_').replace(/_+$/,'');
+  const name='Fehlerspeicher_'+what+'_'+t.getFullYear()+'-'+z(t.getMonth()+1)+'-'+z(t.getDate())+'_'+z(t.getHours())+'-'+z(t.getMinutes())+'.html';
+  const html=report(items,t,all,await iconData());
+  const u=URL.createObjectURL(new Blob([html],{type:'text/html'}));
+  const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(u),10000);
+};
+
+// ---------- Einzelnes Steuergerät ----------
+
+async function upd(){
+  if(ecu===ALL){
+    if(!scanning&&!results.length){st.textContent='Bereit';st.className='pill';btn(false);renderAll();}
+    setTimeout(upd,700);return;
+  }
+  try{
+    const a=ecu;
+    const d=await (await fetch('/api/faults?addr='+a,{cache:'no-store'})).json();
+    if(a!==ecu){setTimeout(upd,50);return;}
+    // Ergebnis gehört zum gewählten Steuergerät?
+    const mine=d.addr===a;
+    sub.textContent=ecuName(a)+' (Adresse '+a+')'+(mine&&d.ident?' · '+d.ident:'');
+    msg.textContent=(mine||d.running)?d.status:'Noch nicht gelesen';
     if(d.running){st.textContent='läuft …';st.className='pill run';btn(true);}
     else{
-      st.textContent=d.error?'Fehler':(d.valid?'Bereit':'Nicht gelesen');
-      st.className='pill'+(d.error?' err':(d.valid?' ok':''));
+      const err=mine&&d.error,ok=mine&&d.valid;
+      st.textContent=err?'Fehler':(ok?'Bereit':'Nicht gelesen');
+      st.className='pill'+(err?' err':(ok?' ok':''));
       btn(false);
     }
+    // Bericht für dieses Steuergerät anbieten, sobald ein Ergebnis da ist
+    if(mine&&!d.running&&(d.valid||d.error)){
+      if(wasRunning||!single||single.a!==a)singleTime=new Date();
+      single={a,n:ecuName(a),d};
+      dl.hidden=false;
+    }else dl.hidden=true;
+    wasRunning=d.running;
     list.innerHTML='';
-    if(d.valid&&d.faults.length===0){
+    if(!mine){}
+    else if(d.valid&&d.faults.length===0){
       const e=document.createElement('div');e.className='empty';e.textContent='Kein Fehler erkannt';list.appendChild(e);
     }else{d.faults.forEach(f=>list.appendChild(card(f)));}
   }catch(e){st.textContent='ESP offline';st.className='pill err';}
@@ -410,7 +649,7 @@ const char OLED_HTML[] PROGMEM = HEAD_HTML("OLED-Anzeige") R"rawliteral(
 <main>
 <h2>Reihenfolge (Taster)</h2>
 <div id="act"></div>
-<p class="hint">Erster Eintrag = Startbildschirm. Danach folgt immer der Codeblock. Diese Werte zeigt auch die Live-Seite.</p>
+<p class="hint">Erster Eintrag = Startbildschirm. Diese Werte zeigt auch die Live-Seite.</p>
 
 <h2>Nicht angezeigt</h2>
 <div id="off"></div>
@@ -424,15 +663,16 @@ const char OLED_HTML[] PROGMEM = HEAD_HTML("OLED-Anzeige") R"rawliteral(
 )rawliteral" NAV_HTML R"rawliteral(
 <script>
 const st=document.getElementById('st');
-const BASE={0:'Spannung',2:'Ladedruck',3:'Verbrauch',4:'Durchschnitt'};
+const BASE={0:'Spannung',2:'Ladedruck',3:'Verbrauch',4:'Durchschnitt',6:'Codeblock'};
 let list=[],custom=[],units=[];
 
 function cname(c){return c.title||('MWB '+c.g+' Feld '+c.f);}
 function name(id){
   if(id>=10){const c=custom[id-10];if(!c||!c.g)return '?';return '★ '+cname(c)+(c.unit?' ['+c.unit+']':'');}
+  if(id===6)return BASE[6];
   return (BASE[id]||'?')+' ['+(units[id]||'')+']';
 }
-function avail(){const a=[0,2,3,4];custom.forEach((c,i)=>{if(c.g)a.push(10+i);});return a;}
+function avail(){const a=[0,2,3,4,6];custom.forEach((c,i)=>{if(c.g)a.push(10+i);});return a;}
 
 function row(txt,btns,sub){
   const r=document.createElement('div');r.className='row';
@@ -446,13 +686,16 @@ function changed(){st.textContent='Nicht gespeichert';st.className='pill run';dr
 function move(i,d){const j=i+d;if(j<0||j>=list.length)return;[list[i],list[j]]=[list[j],list[i]];changed();}
 function hide(i){if(list.length>1){list.splice(i,1);changed();}}
 
+// Der Codeblock hat keine einstellbare Einheit
+function editBtn(id){return id===6?[]:[['✎',()=>edit(id),'','Einheit ändern']];}
+
 function draw(){
   const act=document.getElementById('act'),off=document.getElementById('off'),cus=document.getElementById('cus');
   act.innerHTML='';off.innerHTML='';cus.innerHTML='';
   list.forEach((id,i)=>act.appendChild(row((i+1)+'. '+name(id),[
-    ['✎',()=>edit(id),'','Einheit ändern'],['▲',()=>move(i,-1),'','Nach oben'],['▼',()=>move(i,1),'','Nach unten'],['✕',()=>hide(i),'','Ausblenden']])));
+    ...editBtn(id),['▲',()=>move(i,-1),'','Nach oben'],['▼',()=>move(i,1),'','Nach unten'],['✕',()=>hide(i),'','Ausblenden']])));
   const o=avail().filter(id=>!list.includes(id));
-  o.forEach(id=>off.appendChild(row(name(id),[['✎',()=>edit(id),'','Einheit ändern'],['+',()=>{list.push(id);changed();},'add','Anzeigen']])));
+  o.forEach(id=>off.appendChild(row(name(id),[...editBtn(id),['+',()=>{list.push(id);changed();},'add','Anzeigen']])));
   if(!o.length){const h=document.createElement('p');h.className='hint';h.textContent='Alle Bildschirme werden angezeigt.';off.appendChild(h);}
   let any=false;
   custom.forEach((c,i)=>{if(!c.g)return;any=true;
@@ -535,16 +778,33 @@ const char SETTINGS_HTML[] PROGMEM = HEAD_HTML("Einstellungen") R"rawliteral(
   <div class="meta">Gerät misst gerade: <b id="volt">-</b> (mit gespeicherter Korrektur) · Standard: <b id="df-vo">-</b></div>
 </div>
 
+<h2>Verbrauch</h2>
+
+<div class="set">
+  <div class="set-h"><label for="sp">Geschwindigkeitsabweichung</label><button class="info" aria-expanded="false" aria-controls="d-sp" aria-label="Info zu Geschwindigkeitsabweichung">i</button></div>
+  <div class="desc" id="d-sp">Das Steuergerät kennt deine Reifengröße nicht, deshalb weicht seine Geschwindigkeit oft von der echten ab. Mit diesem Wert wird sie für die Berechnung von <b>Verbrauch und Durchschnitt</b> korrigiert. Bei <b>−1,5 %</b> wird mit 1,5 % weniger Geschwindigkeit gerechnet.<br><br><b>So geht's:</b> Bei konstanter Fahrt die Geschwindigkeit vom GPS mit dem Wert in <b>Messwerte → Block 6, Feld 1</b> vergleichen. Abweichung = (GPS ÷ Steuergerät − 1) × 100. Beispiel: Steuergerät 100 km/h, GPS 98,5 km/h ergibt −1,5 %.<br><br>Der angezeigte Wert in Block 6 bleibt unverändert. Bereich −15,0 bis +15,0 %.</div>
+  <div class="ctl"><button class="ib" data-t="sp" data-s="-0.1" aria-label="Weniger">&minus;</button><input id="sp" type="number" step="0.1" min="-15" max="15" inputmode="decimal"><button class="ib" data-t="sp" data-s="0.1" aria-label="Mehr">+</button><span class="u">%</span></div>
+  <div class="meta">Beispiel: 100 km/h vom Steuergerät → gerechnet <b id="spEx">-</b> · Standard: <b id="df-sp">-</b></div>
+</div>
+
+<h2>Steuergeräte</h2>
+
+<div class="set">
+  <div class="set-h"><label>Gefundene Baudraten</label><button class="info" aria-expanded="false" aria-controls="d-bd" aria-label="Info zu Baudraten">i</button></div>
+  <div class="desc" id="d-bd">Jedes Steuergerät spricht mit einer festen Geschwindigkeit (Baudrate). Beim ersten Fehlerspeicher-Lesen probiert das Gerät 9600, 10400, 4800, 2400 und 1200 Baud durch – das kann bis ca. 20 s dauern. Die gefundene Baudrate wird <b>dauerhaft gespeichert</b>, danach geht es sofort.<br><br>Passt eine gespeicherte Baudrate nicht mehr (z. B. nach Tausch eines Steuergeräts), wird sie automatisch verworfen und neu gesucht. Nur zur Info, hier ist nichts einzustellen.</div>
+  <div id="bauds" style="margin-top:6px"></div>
+</div>
+
 <div class="btns">
   <button class="btn" id="rs">Standardwerte</button>
   <button class="btn pri" id="sv">Speichern</button>
 </div>
 <div class="note" id="msg" hidden></div>
 </main>
-)rawliteral" NAV_HTML R"rawliteral(
+)rawliteral" NAV_HTML ECU_JS R"rawliteral(
 <script>
 const st=document.getElementById('st'),msg=document.getElementById('msg');
-const lp=document.getElementById('lp'),dp=document.getElementById('dp'),vo=document.getElementById('vo');
+const lp=document.getElementById('lp'),dp=document.getElementById('dp'),vo=document.getElementById('vo'),sp=document.getElementById('sp');
 const fmt=(v,d)=>Number(v).toFixed(d).replace('.',',');
 let def=null,dirty=false;
 
@@ -555,17 +815,29 @@ document.querySelectorAll('.info').forEach(b=>b.onclick=()=>{
 });
 
 function mark(){dirty=true;st.textContent='Nicht gespeichert';st.className='pill run';msg.hidden=true;}
-[lp,dp,vo].forEach(i=>i.oninput=mark);
+[lp,dp,vo,sp].forEach(i=>i.oninput=()=>{mark();spEx();});
+function spEx(){const v=parseFloat(sp.value);document.getElementById('spEx').textContent=isNaN(v)?'-':fmt(100+v,1)+' km/h';}
 
 document.querySelectorAll('.ctl .ib').forEach(b=>b.onclick=()=>{
   const i=document.getElementById(b.dataset.t);
   const s=parseFloat(b.dataset.s),dec=b.dataset.t==='vo'?2:1;
   let v=(parseFloat(i.value)||0)+s;
   v=Math.min(parseFloat(i.max),Math.max(parseFloat(i.min),v));
-  i.value=v.toFixed(dec);mark();
+  i.value=v.toFixed(dec);mark();spEx();
 });
 
-function fill(d){lp.value=(d.lp/1000).toFixed(1);dp.value=(d.dp/1000).toFixed(1);vo.value=Number(d.vo).toFixed(2);}
+function showBauds(b){
+  const box=document.getElementById('bauds');box.innerHTML='';
+  ECUS.forEach(([a,n])=>{
+    const r=document.createElement('div');r.className='kv';
+    const l=document.createElement('span');l.textContent=a+' – '+n;
+    const v=document.createElement('b');v.textContent=b[a]?b[a]+' Baud':'noch nicht ermittelt';
+    if(!b[a])v.className='dim';
+    r.appendChild(l);r.appendChild(v);box.appendChild(r);
+  });
+}
+
+function fill(d){lp.value=(d.lp/1000).toFixed(1);dp.value=(d.dp/1000).toFixed(1);vo.value=Number(d.vo).toFixed(2);sp.value=Number(d.sp).toFixed(1);spEx();}
 
 async function load(){
   try{
@@ -574,7 +846,9 @@ async function load(){
     document.getElementById('df-lp').textContent=fmt(def.lp/1000,1)+' s';
     document.getElementById('df-dp').textContent=fmt(def.dp/1000,1)+' s';
     document.getElementById('df-vo').textContent=fmt(def.vo,2)+' V';
+    document.getElementById('df-sp').textContent=fmt(def.sp,1)+' %';
     document.getElementById('volt').textContent=fmt(d.volt,2)+' V';
+    showBauds(d.bauds||{});
     if(!dirty){fill(d);st.textContent='Gespeichert';st.className='pill ok';}
   }catch(e){st.textContent='ESP offline';st.className='pill err';}
 }
@@ -588,7 +862,7 @@ async function volt(){
 document.getElementById('rs').onclick=()=>{if(def){fill(def);mark();}};
 
 document.getElementById('sv').onclick=async()=>{
-  const q='lp='+Math.round(parseFloat(lp.value)*1000)+'&dp='+Math.round(parseFloat(dp.value)*1000)+'&vo='+parseFloat(vo.value).toFixed(2);
+  const q='lp='+Math.round(parseFloat(lp.value)*1000)+'&dp='+Math.round(parseFloat(dp.value)*1000)+'&vo='+parseFloat(vo.value).toFixed(2)+'&sp='+parseFloat(sp.value).toFixed(1);
   try{
     const r=await fetch('/api/settings/save?'+q,{method:'POST'});
     const d=await r.json();

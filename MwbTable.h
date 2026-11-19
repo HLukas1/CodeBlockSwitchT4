@@ -98,6 +98,12 @@ const MwbInfo MWB_TABLE[] = {
     {"Abweichende Einspritzmenge Zyl. 4 zu Zyl. 3", "mg/H", "+/- 2,0"},
     {"Abweichende Einspritzmenge Zyl. 5 zu Zyl. 3", "mg/H", "+/- 2,0"}}},
 
+  {15, "Kraftstoffverbrauch", "", {
+    {"-", "-", "-"},
+    {"-", "-", "-"},
+    {"Kraftstoffverbrauch pro Stunde", "l/h", "-"},
+    {"-", "-", "-"}}},
+
 
 
   {18, "Schalterstellungen", "", {

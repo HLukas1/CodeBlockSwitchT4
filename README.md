@@ -56,7 +56,8 @@ Der CodeBlockSwitchT4 steckt in der OBD-Buchse, spricht über die K-Line mit dem
 | 🧩 **Voll modular** | Jedes Feld aus jedem Messwerteblock (1–255) lässt sich als eigener Wert auf OLED und Handy legen |
 | ⚡ **Codeblock 2 ↔ 3** | 102 PS ↔ 138 PS per langem Tastendruck oder in der WebApp, der WSC bleibt erhalten – **nur mit angepasster Motorsoftware** |
 | 🔧 **Fehlerspeicher** | Lesen und Löschen mit Klartext, Ursache und Auswirkung; beim Start automatischer Check (`! n FSP`) |
-| ⛽ **Verbrauch** | Aktueller Verbrauch in L/100 km und Fahrt-Durchschnitt, berechnet aus Einspritzmenge, Drehzahl und Geschwindigkeit |
+| 🚐 **Alle Steuergeräte** | Fehlerspeicher auch von Bremse, Climatronic, Airbag, Kombiinstrument und Gateway – alles über die K-Line |
+| ⛽ **Verbrauch** | Aktueller Verbrauch in L/100 km und Fahrt-Durchschnitt, aus dem L/h-Wert des Steuergeräts und der Geschwindigkeit, mit einstellbarer Geschwindigkeitsabweichung |
 | 🔌 **Diagnose aus** | K-Line auf Knopfdruck freigeben, z. B. für VCDS, ohne das Gerät abzuziehen |
 | 💾 **Alles gespeichert** | Bildschirme, Einheiten, eigene Werte und Einstellungen bleiben nach dem Ausschalten erhalten |
 
@@ -74,10 +75,10 @@ Das Gerät ist nicht auf fest einprogrammierte Werte beschränkt. **Jeder Messwe
 | Was | Wie viel |
 |---|---|
 | Eigene Messwerte | bis zu **8** |
-| Bildschirme in der Reihenfolge | bis zu **12** (plus Codeblock) |
-| Feste Bildschirme | Spannung, Ladedruck, Verbrauch, Durchschnitt |
+| Bildschirme in der Reihenfolge | bis zu **13** |
+| Feste Bildschirme | Spannung, Ladedruck, Verbrauch, Durchschnitt, Codeblock (alle ausblendbar) |
 | Umrechnungen | 70 KWP1281-Kennzahlen (Temperatur, Druck, Winkel, Spannung, Text …) |
-| Hinterlegte Blöcke | 16 Blöcke mit Titel und Feldnamen, 62 Fehlercodes mit Klartext |
+| Hinterlegte Blöcke | 16 Blöcke mit Titel und Feldnamen, 93 Fehlercodes mit Klartext (Motor, Airbag, Kombiinstrument, Wegfahrsicherung) |
 
 Drehzahl oder Einspritzmenge stehen deshalb nicht als feste Bildschirme bereit: Sie sind einfach eigene Messwerte aus Block 1.
 
@@ -182,8 +183,7 @@ const char* AP_PASS = "12345678";   // mind. 8 Zeichen – unbedingt ändern
 | Aktion | Wirkung |
 |---|---|
 | Kurz drücken | nächster Bildschirm laut Reihenfolge |
-| Nach dem letzten Bildschirm | Codeblock-Anzeige (`CB: 3 / 138PS`) |
-| Kurz drücken im Codeblock | zurück zum ersten Bildschirm |
+| Kurz drücken nach dem letzten Bildschirm | zurück zum ersten Bildschirm |
 | Lang drücken im Codeblock (Std. 3 s) | Codeblock 2 ↔ 3 schreiben |
 | Sehr lang drücken im Spannungsbildschirm (Std. 5 s) | Diagnose aus ↔ an |
 
@@ -218,7 +218,7 @@ Beim Einschalten erscheint das Startlogo, dann wird einmal der Fehlerspeicher ge
 
 Zeigt genau die Werte, die unter **OLED** ausgewählt sind – in derselben Reihenfolge und mit deinen Bezeichnungen. Der Wert, der gerade am Gerät zu sehen ist, ist blau markiert.
 
-Darunter steht der aktive **Codeblock** (102 PS / 138 PS) mit einem Knopf zum Umschalten. Nach dem Schreiben erscheint **„Bitte Zündungswechsel durchführen“** – die neue Leistung ist erst nach Zündung aus/an aktiv. Eine Leistungsänderung gibt es nur mit angepasster Motorsoftware.
+Ist der Codeblock unter **OLED** eingeblendet, steht er hier als eigene Karte (102 PS / 138 PS) mit einem Knopf zum Umschalten. Ist er ausgeblendet, fehlt er auch hier, und die Umschaltung ist abgeschaltet. Nach dem Schreiben erscheint **„Bitte Zündungswechsel durchführen“** – die neue Leistung ist erst nach Zündung aus/an aktiv. Eine Leistungsänderung gibt es nur mit angepasster Motorsoftware.
 
 </td>
 </tr>
@@ -228,7 +228,7 @@ Darunter steht der aktive **Codeblock** (102 PS / 138 PS) mit einem Knopf zum Um
 
 **Messwerte**
 
-Blättert durch alle Messwerteblöcke 1–255. Jede Karte zeigt Feldname, Wert und Einheit sowie die Rohdaten (Kennzahl, a, b).
+Blättert durch alle Messwerteblöcke 1–255 des Motorsteuergeräts. Jede Karte zeigt Feldname, Wert und Einheit sowie die Rohdaten (Kennzahl, a, b).
 
 **Karte antippen** → der Wert wird zum eigenen Messwert für OLED und Live-Seite.
 
@@ -242,7 +242,7 @@ Blättert durch alle Messwerteblöcke 1–255. Jede Karte zeigt Feldname, Wert u
 
 Legt fest, was am Gerät und auf der Live-Seite angezeigt wird:
 
-- ▲ ▼ Reihenfolge (erster Eintrag = Startbildschirm)
+- ▲ ▼ Reihenfolge (erster Eintrag = Startbildschirm), auch für den Codeblock
 - ✕ ausblenden, **+** wieder anzeigen
 - ✎ Bezeichnung / Einheit fürs OLED (max. 9 Zeichen)
 - 🗑 eigenen Messwert löschen
@@ -264,8 +264,11 @@ Jede Einstellung hat ein **ⓘ** mit Erklärung.
 | Langer Druck (Codeblock) | 3,0 s | 1,0–10,0 s |
 | Diagnose aus / an | 5,0 s | 2,0–20,0 s, mind. 1 s länger als der lange Druck |
 | Spannungskorrektur | 0,00 V | −3,00 bis +3,00 V |
+| Geschwindigkeitsabweichung | 0,0 % | −15,0 bis +15,0 % |
 
 Bei der Spannungskorrektur zeigt die Seite die gerade gemessene Spannung an – einfach mit einem Multimeter an der Batterie vergleichen.
+
+Die Geschwindigkeitsabweichung gleicht aus, dass das Steuergerät die Reifengröße nicht kennt. Bei −1,5 % wird für Verbrauch und Durchschnitt mit 1,5 % weniger Geschwindigkeit gerechnet. Den Wert ermittelst du per GPS-Vergleich: (GPS ÷ Steuergerät − 1) × 100.
 
 </td>
 </tr>
@@ -275,7 +278,7 @@ Bei der Spannungskorrektur zeigt die Seite die gerade gemessene Spannung an – 
 
 **Fehler**
 
-Fehlerspeicher des Motorsteuergeräts lesen und löschen. Bekannte Fehlercodes erscheinen mit OBD-Code, Klartext, Ursache und Auswirkung; sporadische Fehler sind gelb markiert.
+Oben das **Steuergerät** wählen, dann dessen Fehlerspeicher lesen und löschen. Mit **„Alle Steuergeräte“** werden alle nacheinander gelesen; danach gibt es den kompletten Auszug als **HTML-Bericht zum Herunterladen**. Bekannte Fehlercodes erscheinen mit OBD-Code, Klartext, Ursache und Auswirkung; sporadische Fehler sind gelb markiert.
 
 </td>
 </tr>
@@ -287,15 +290,13 @@ Fehlerspeicher des Motorsteuergeräts lesen und löschen. Bekannte Fehlercodes e
 
 ## Einstellungen im Code
 
-Was sich nicht in der WebApp einstellen lässt, steht in `CodeBlockSwitchT4.ino` – die meisten Konstanten ganz oben, die Verbrauchswerte in `calculateLitersPerHour()`:
+Was sich nicht in der WebApp einstellen lässt, steht in `CodeBlockSwitchT4.ino`, die meisten Konstanten ganz oben:
 
 | Konstante | Standard | Bedeutung |
 |---|---|---|
 | `AP_SSID` / `AP_PASS` | `CodeBlockSwitchT4` / `12345678` | WLAN-Hotspot – **Passwort ändern!** |
 | `TESTBENCH_MODE` | `0` | `1` = Fahrzeug wird simuliert (Entwickeln am Schreibtisch) |
 | `R_TOP` / `R_BOTTOM` | 47 : 10 | Verhältnis des Spannungsteilers |
-| `INJECTIONS_PER_REV` | `2.5` | Einspritzungen pro Umdrehung (5-Zylinder; 4-Zylinder = 2.0) |
-| `DIESEL_DENSITY_MG_PER_L` | `832000` | Dieseldichte – zum Kalibrieren des Verbrauchs |
 | `FUEL_AVG_SAMPLES` | `35` | Glättung des aktuellen Verbrauchs |
 | `MEASUREMENT_INTERVAL_MS` | `500` | Messintervall |
 | `DEFAULT_LONG_PRESS_MS` u. a. | – | Standardwerte der WebApp-Einstellungen |
@@ -320,11 +321,29 @@ CodeBlockSwitchT4/
 └── images/                      Stromlaufplan, Icon, Screenshots, Foto und Video
 ```
 
+### Steuergeräte
+
+Alle Steuergeräte des T4 hängen an der K-Line (OBD Pin 7) und sprechen KW1281. Auf der Seite **Fehler** sind die Steuergeräte aus dem Autoscan wählbar (Messwerte vorerst nur vom Motor):
+
+| Adresse | Steuergerät |
+|---|---|
+| 01 | Motorelektronik |
+| 03 | Bremse (ABS / EDS) |
+| 08 | Climatronic |
+| 15 | Airbag |
+| 17 | Kombiinstrument |
+| 19 | Gateway |
+
+- Die **Baudrate** findet das Gerät beim ersten Verbinden selbst heraus (9600, 10400, 4800, 2400 oder 1200) und **speichert sie dauerhaft** (Namespace `baud`). Nur das allererste Verbinden kann bis ca. 20 s dauern. Passt eine gespeicherte Baudrate nicht mehr, wird sie verworfen und neu gesucht. Die gefundenen Werte stehen in der WebApp unter **Einstellungen → Steuergeräte**.
+- Solange ein anderes Steuergerät gewählt ist, **pausieren die Motorwerte** und das OLED zeigt z. B. `SG 15`. Wird die Seite verlassen, verbindet sich das Gerät nach 3 s wieder mit dem Motor.
+- Fehlercodes sind bei VAG für alle Steuergeräte gleich; Klartexte gibt es für alle Codes aus `FaultTable.h`.
+- Weitere Steuergeräte ergänzt du in `WebPages.h` in der Liste `ECUS`.
+
 ### KWP1281-Ablauf
 
-1. 5-Baud-Init auf Adresse `0x01` (Motorsteuergerät)
+1. 5-Baud-Init auf die Adresse des Steuergeräts (Motor `0x01`)
 2. Steuergerät antwortet `55 01 8A`, Tester sendet das Komplement
-3. Identifikationsblöcke werden gelesen; der Codierblock liefert Codierung und WSC
+3. Identifikationsblöcke werden gelesen; beim Motor liefert der Codierblock Codierung und WSC
 4. Danach fragt das Gerät Messwerteblöcke ab (`0x29`) und hält die Verbindung mit Keep-Alive offen
 
 | Block | Funktion |
@@ -340,8 +359,8 @@ CodeBlockSwitchT4/
 
 | Wert | Quelle |
 |---|---|
-| Drehzahl, Einspritzmenge | MWB 1, Feld 1 und 2 |
-| Geschwindigkeit | MWB 6, Feld 1 |
+| Verbrauch in L/h | MWB 15, Feld 3 |
+| Geschwindigkeit | MWB 6, Feld 1, korrigiert um die Geschwindigkeitsabweichung |
 | Ladedruck (Überdruck) | MWB 10, Feld 3 − Feld 2 |
 | Bordspannung | eigener ADC am Spannungsteiler |
 | Eigene Messwerte | beliebiger Block / Feld |
@@ -350,9 +369,9 @@ Ist die WebApp offen, liest das Gerät alle Werte der OLED-Liste; eigene Messwer
 
 ### Verbrauch
 
-$$\text{L/h} = \frac{\text{mg/Hub} \cdot \text{U/min} \cdot 2{,}5 \cdot 60}{832\,000}
-\qquad
-\text{L/100km} = \frac{\text{L/h} \cdot 100}{\text{km/h}}$$
+$$\text{L/100km} = \frac{\text{L/h} \cdot 100}{\text{km/h} \cdot (1 + \text{Abweichung}/100)}$$
+
+Die L/h liefert das Steuergerät direkt (MWB 15, Feld 3). Es berechnet sie selbst aus seiner Einspritzmenge, gemessen wird der Durchfluss nicht. Die Genauigkeit lässt sich am besten über eine Tankfüllung prüfen.
 
 Der aktuelle Verbrauch wird über 35 Werte geglättet und unter 10 km/h als 0,0 angezeigt. Der Fahrt-Durchschnitt zählt in **jedem** Bildschirm mit (ab 4 km/h, Anzeige ab 100 m Strecke) und beginnt nach jedem Neustart bei 0.
 
@@ -363,6 +382,7 @@ Der aktuelle Verbrauch wird über 35 Werte geglättet und unter 10 km/h als 0,0 
 | `oled` | Reihenfolge der Bildschirme, eigene Messwerte, Einheiten |
 | `cfg` | Einstellungen aus der WebApp |
 | `diag` | Diagnose aus / an |
+| `baud` | Gefundene Baudraten der Steuergeräte |
 
 ### API
 

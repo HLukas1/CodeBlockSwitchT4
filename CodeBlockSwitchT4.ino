@@ -1,3 +1,35 @@
+// =====================================================
+// CodeBlockSwitchT4
+// OBD-Anzeige mit WebApp für den VW T4 TDI (KWP1281)
+// https://github.com/HLukas1/CodeBlockSwitchT4
+//
+// Version: 2.1.0   Stand: 16.11.2026
+//
+// Änderungen
+// 2.1.0  - Fehlerspeicher für alle Steuergeräte (01, 03, 08,
+//          15, 17, 19), Baudrate wird automatisch gefunden
+//          und dauerhaft gespeichert
+//        - Verbrauch aus MWB 15 Feld 3 (L/h vom Steuergerät),
+//          Geschwindigkeitsabweichung in den Einstellungen
+//        - Codeblock als normaler, ausblendbarer Bildschirm,
+//          in der WebApp anzeigen und umschalten
+//        - WebApp neu: Live-Seite mit allen OLED-Werten,
+//          Einstellungen, App-Icon
+//        - Diagnose aus/an per langem Tastendruck (für VCDS)
+//        - Fahrt-Durchschnitt zählt in jedem Bildschirm
+//        - Fehlertexte für Airbag, Kombiinstrument und
+//          Wegfahrsicherung
+//        - KWP1281: Klartext-Messwerte, lange Antwortblöcke,
+//          Kennung von Gateway-Steuergeräten
+//        - Fehlerspeicher aller Steuergeräte in einem Durchgang,
+//          Bericht als HTML zum Herunterladen
+// 2.0.0  - Ausgangsversion (CodeBlockSwitschT4_V2)
+//
+// Neue Version: FW_VERSION erhöhen und oben eintragen.
+// =====================================================
+
+#define FW_VERSION "2.1.0"
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -86,6 +118,10 @@ const uint32_t INTERBLOCK_TIMEOUT_MS = 1100;
 // Timeout waehrend Kommunikationsaufbau
 const uint32_t INIT_TIMEOUT_MS = 250;
 
+// Warten auf das Sync-Byte 0x55 nach der 5-Baud-Adresse.
+// Steuergeräte hinter dem Gateway K<->CAN antworten langsamer.
+const uint32_t SYNC_TIMEOUT_MS = 600;
+
 // Anzahl Verbindungsversuche
 const uint8_t MAX_CONNECT_ATTEMPTS = 4;
 
@@ -101,12 +137,39 @@ uint8_t blockCounter = 1;
 uint16_t Coding = 0;
 uint32_t WSC = 0;
 
+// Aktuell verbundenes Steuergerät (MSG_ADDRESS = Motor)
+uint8_t kwpAddress = MSG_ADDRESS;
+String ecuIdentText = "";
 
-uint16_t lastRpm = 0;
+// KW1281-Baudraten zum Durchprobieren und gefundene Baudrate
+// je Adresse (0 = noch unbekannt, wird beim ersten Verbinden ermittelt)
+const uint32_t KWP_BAUD_CANDIDATES[] = {9600, 10400, 4800, 2400, 1200};
+const uint8_t KWP_BAUD_COUNT = sizeof(KWP_BAUD_CANDIDATES) / sizeof(KWP_BAUD_CANDIDATES[0]);
+uint32_t ecuBaudCache[128] = {0};   // dauerhaft im Flash (Namespace "baud")
+
+// Beim Init kam etwas, aber nicht 55 01 8A -> Baudrate passt vermutlich nicht
+bool kwpBaudMismatch = false;
+
+// WebApp: gewähltes Steuergerät auf Messwerte/Fehler-Seite
+uint8_t  webEcuAddress  = MSG_ADDRESS;
+uint32_t lastEcuRequest = 0;
+
+// Fehlerspeicher: Ziel der nächsten Anfrage / Steuergerät der Fehlerliste
+uint8_t pendingFaultAddress = MSG_ADDRESS;
+uint8_t faultDataAddress = MSG_ADDRESS;
+
+// Anderes Steuergerät als der Motor ist in der WebApp gewählt
+// und die Seite ist offen -> Motor-Livewerte pausieren
+bool foreignEcuActive() {
+  return webEcuAddress != MSG_ADDRESS &&
+         lastEcuRequest != 0 &&
+         (millis() - lastEcuRequest) < 3000;
+}
+
+
 uint16_t lastBoostMbar = 0;
-float injectionActual = 0.0;
 
-float currentSpeed = 0.0;
+float currentSpeed = 0.0;   // km/h inkl. Geschwindigkeitsabweichung
 float fuelConsumption = 0.0;
 
 // =====================================================
@@ -123,6 +186,11 @@ uint32_t lastAverageMeasurementTime = 0;
 
 // Durchschnitt alle 2 s aktualisieren
 const uint32_t AVERAGE_MEASUREMENT_INTERVAL_MS = 2000;
+
+// Abweichung MSG-Geschwindigkeit zur echten (z. B. GPS) in %.
+// -1,5 -> mit 1,5 % weniger rechnen. In der WebApp einstellbar.
+const float DEFAULT_SPEED_CORRECTION_PCT = 0.0f;
+float speedCorrectionPercent = DEFAULT_SPEED_CORRECTION_PCT;
 
 // Unter dieser Geschwindigkeit nicht mitzählen (Standzeit)
 const float FUEL_MIN_SPEED_KMH = 4.0f;
@@ -234,17 +302,19 @@ const uint8_t SCR_BOOST       = 2;
 const uint8_t SCR_CONSUMPTION = 3;
 const uint8_t SCR_AVERAGE     = 4;
 const uint8_t SCR_INJECTION   = 5;
+const uint8_t SCR_CODEBLOCK   = 6;
 const uint8_t SCR_CUSTOM1     = 10;   // 10..17 = eigene Messwerte
 
-const uint8_t MAX_SCREENS = 12;
+const uint8_t MAX_SCREENS = 13;   // alle 4 festen, 8 eigene, Codeblock
 const uint8_t MAX_CUSTOM  = 8;
 
 // Standard = bisherige Reihenfolge
 uint8_t screenList[MAX_SCREENS] = {
   SCR_VOLTAGE, SCR_BOOST,
-  SCR_CONSUMPTION, SCR_AVERAGE
+  SCR_CONSUMPTION, SCR_AVERAGE,
+  SCR_CODEBLOCK
 };
-uint8_t screenCount = 4;
+uint8_t screenCount = 5;
 uint8_t screenIndex = 0;
 uint8_t currentScreenId = SCR_VOLTAGE;
 
@@ -336,6 +406,7 @@ uint32_t lastMwbRequest = 0;
 KwpValue mwbData[KWP_MAX_FIELDS];
 uint8_t  mwbCount     = 0;       // Anzahl gelesener Felder
 uint8_t  mwbDataGroup = 0;       // Block, zu dem mwbData gehört
+uint8_t  mwbDataAddress = 0;     // Steuergerät, zu dem mwbData gehört
 bool     mwbError     = false;
 
 // =====================================================
@@ -437,7 +508,8 @@ bool parseCodingBlock(
 
 bool readIdentificationBlocks();
 
-bool connectMSGOnce();
+bool connectEcuOnce(uint8_t address);
+bool connectECU(uint8_t address, uint8_t maxAttempts = MAX_CONNECT_ATTEMPTS);
 bool connectMSG(uint8_t maxAttempts = MAX_CONNECT_ATTEMPTS);
 void disconnectMSG();
 
@@ -462,8 +534,9 @@ bool readMeasurement(
 
 bool faultPageActive();
 
-void calculateFuelConsumption();
-float calculateLitersPerHour(uint16_t rpm, float injection);
+void calculateFuelConsumption(float litersPerHour);
+bool readFuelValues(float &litersPerHour, float &speedKmh);
+bool readAndCalculateConsumption();
 void updateAverageFuelConsumption(float litersPerHour, float speedKmh);
 bool readTripAverageValues();
 
@@ -704,7 +777,7 @@ bool readInitialResponse() {
   uint8_t keyByte1 = 0;
   uint8_t keyByte2 = 0;
 
-  if (!obdReadByte(syncByte, INIT_TIMEOUT_MS)) {
+  if (!obdReadByte(syncByte, SYNC_TIMEOUT_MS)) {
     Serial.println(
       "FEHLER: Kein Synchronisationsbyte.");
 
@@ -719,6 +792,7 @@ bool readInitialResponse() {
     Serial.println(
       "FEHLER: Synchronisationsbyte ist nicht 0x55.");
 
+    kwpBaudMismatch = true;
     return false;
   }
 
@@ -747,6 +821,7 @@ bool readInitialResponse() {
     Serial.println(
       "FEHLER: Erwartetes Keyword 01 8A fehlt.");
 
+    kwpBaudMismatch = true;
     return false;
   }
 
@@ -1147,6 +1222,11 @@ bool parseCodingBlock(
   uint16_t codingRaw =
     ((uint16_t)pp0 << 8) | (uint16_t)pp1;
 
+  // Codeblock-Logik braucht nur die Codierung des Motors
+  if (kwpAddress != MSG_ADDRESS) {
+    return true;
+  }
+
   Coding = codingRaw >> 1;
 
   WSC =
@@ -1218,6 +1298,12 @@ bool readIdentificationBlocks() {
           i++) {
           uint8_t data = buffer[i];
 
+          // Bit 7 des ersten Zeichens kündigt weitere
+          // Identifikationen an (z. B. Gateway) -> ausblenden
+          if (identificationText.length() == 0 && i == 3) {
+            data &= 0x7F;
+          }
+
           if (
             data >= 0x20 && data <= 0x7E) {
             identificationText +=
@@ -1245,9 +1331,12 @@ bool readIdentificationBlocks() {
         "Tester besitzt jetzt die Master-Funktion.");
 
       if (identificationText.length() > 0) {
-        Serial.print("MSG-Identifikation: ");
+        Serial.print("SG-Identifikation: ");
         Serial.println(identificationText);
       }
+
+      ecuIdentText = identificationText;
+      ecuIdentText.trim();
 
       return true;
     }
@@ -1288,14 +1377,18 @@ bool readIdentificationBlocks() {
 // EIN VERBINDUNGSVERSUCH
 // =====================================================
 
-bool connectMSGOnce() {
+bool connectEcuOnce(uint8_t address) {
   kwpConnected = false;
+  kwpAddress = address;
+  ecuIdentText = "";
 
   blockCounter = 1;
-  Coding = 0;
-  WSC = 0;
+  if (address == MSG_ADDRESS) {
+    Coding = 0;
+    WSC = 0;
+  }
 
-  send5BaudAddress(MSG_ADDRESS);
+  send5BaudAddress(address);
 
   // UART unmittelbar nach 5-Baud-Adresswort starten.
   startKLine();
@@ -1327,35 +1420,71 @@ bool connectMSGOnce() {
 // VERBINDEN MIT WIEDERHOLUNG
 // =====================================================
 
-bool connectMSG(uint8_t maxAttempts) { 
+bool connectMSG(uint8_t maxAttempts) {
+  return connectECU(MSG_ADDRESS, maxAttempts);
+}
+
+// Verbindet mit einem beliebigen KW1281-Steuergerät.
+// Ist ein anderes verbunden, wird es vorher sauber getrennt.
+// Unbekannte Baudrate: alle Kandidaten einmal durchprobieren.
+bool connectECU(uint8_t address, uint8_t maxAttempts) {
 
 #if TESTBENCH_MODE
   kwpConnected = true;
-  Coding = 2;
-  WSC = 0;
- 
+  kwpAddress = address;
+  if (address == MSG_ADDRESS) {
+    Coding = 2;
+    WSC = 0;
+  }
+
   Serial.println("TESTBENCH: Fahrzeugverbindung simuliert.");
   return true;
 #endif
 
-  // Ab hier bleibt der bisherige Code von connectMSG()
-
-  if (kwpConnected) {
+  if (kwpConnected && kwpAddress == address) {
     return true;
   }
+
+  if (kwpConnected) {
+    disconnectMSG();
+  }
+
+  uint32_t knownBaud = ecuBaudCache[address & 0x7F];
+  bool anyMismatch = false;
+  uint8_t tries = maxAttempts;
+  if (knownBaud == 0 && tries < KWP_BAUD_COUNT) {
+    tries = KWP_BAUD_COUNT;
+  }
+
   for (
     uint8_t attempt = 1;
-    attempt <= maxAttempts;
+    attempt <= tries;
     attempt++) {
+    KLINE_BAUD = knownBaud != 0
+                   ? knownBaud
+                   : KWP_BAUD_CANDIDATES[(attempt - 1) % KWP_BAUD_COUNT];
+
     Serial.println();
     Serial.print("Verbindungsversuch ");
     Serial.print(attempt);
     Serial.print(" von ");
-    Serial.println(maxAttempts);   
+    Serial.print(tries);
+    Serial.print(" (Adresse 0x");
+    printHex(address);
+    Serial.print(", ");
+    Serial.print(KLINE_BAUD);
+    Serial.println(" Baud)");
 
-    if (connectMSGOnce()) {
+    kwpBaudMismatch = false;
+
+    if (connectEcuOnce(address)) {
+      if (ecuBaudCache[address & 0x7F] != KLINE_BAUD) {
+        ecuBaudCache[address & 0x7F] = KLINE_BAUD;
+        saveBaudCache();
+      }
+
       Serial.println();
-      Serial.println("MSG verbunden.");
+      Serial.println("Steuergerät verbunden.");
 
       Serial.print("Aktuelle Codierung: ");
       Serial.println(Coding);
@@ -1369,14 +1498,41 @@ bool connectMSG(uint8_t maxAttempts) {
     Serial.println(
       "Verbindungsversuch fehlgeschlagen.");
 
+    anyMismatch = anyMismatch || kwpBaudMismatch;
     stopKLine(true);
+  }
+
+  // Gespeicherte Baudrate passt nicht mehr -> beim nächsten Mal neu suchen.
+  // Nicht beim Motor (sonst lange Suche bei Zündung aus).
+  if (knownBaud != 0 && anyMismatch && address != MSG_ADDRESS) {
+    Serial.println("Gespeicherte Baudrate verworfen.");
+    ecuBaudCache[address & 0x7F] = 0;
+    saveBaudCache();
   }
 
   Serial.println();
   Serial.println(
-    "FEHLER: Keine Verbindung zum MSG.");
+    "FEHLER: Keine Verbindung zum Steuergerät.");
 
   return false;
+}
+
+// =====================================================
+// BAUDRATEN DER STEUERGERÄTE (Flash, Namespace "baud")
+// =====================================================
+
+void loadBaudCache() {
+  prefs.begin("baud", true);
+  if (prefs.getBytesLength("tab") == sizeof(ecuBaudCache)) {
+    prefs.getBytes("tab", ecuBaudCache, sizeof(ecuBaudCache));
+  }
+  prefs.end();
+}
+
+void saveBaudCache() {
+  prefs.begin("baud", false);
+  prefs.putBytes("tab", ecuBaudCache, sizeof(ecuBaudCache));
+  prefs.end();
 }
 
 
@@ -1563,6 +1719,7 @@ String faultTypeText(uint8_t type) {
     case 0x0C: return "elektrischer Fehler";
     case 0x0D: return "bitte Fehlerspeicher auslesen";
     case 0x0E: return "defekt";
+    case 0x20: return "Widerstandswert zu groß";
 	case 0x23: return "";   // SAE/P-Code-Kennung, keine eigene Fehlerart
     default:   return "Fehlerart " + String(type & 0x7F);
   }
@@ -1853,7 +2010,8 @@ bool readMeasurementGroup(
     return false;
   }
 
-  uint8_t response[64];
+  // Blöcke bis 255 Byte sind erlaubt (Klartext-Anzeigen sind länger)
+  uint8_t response[256];
   uint16_t responseSize = 0;
 
   if (!kwpReceiveBlock(response, sizeof(response), responseSize)) {
@@ -1875,6 +2033,26 @@ bool readMeasurementGroup(
   }
 
   uint16_t dataBytes = responseSize - 4;
+
+  // Kennzahl 63: der ganze Block ist Klartext (bis 40 Zeichen)
+  if (dataBytes >= 1 && response[3] == 63) {
+    values[0].formula = 63;
+    values[0].a = 0;
+    values[0].b = 0;
+    values[0].isText = true;
+    values[0].value = 0;
+    values[0].unit = "";
+    values[0].text = "";
+    for (uint16_t i = 4; i < responseSize - 1; i++) {
+      if (response[i] >= 0x20 && response[i] <= 0x7E) {
+        values[0].text += (char)response[i];
+      }
+    }
+    values[0].text.trim();
+    values[0].valid = true;
+    fieldCount = 1;
+    return true;
+  }
 
   if (dataBytes == 0 || (dataBytes % 3) != 0) {
     Serial.println("FEHLER: Datenformat ist ungueltig.");
@@ -2006,25 +2184,51 @@ bool readMeasurement(
 
 
 // =====================================================
-// KRAFTSTOFF PRO STUNDE (L/h)
-// 5-Zylinder, 4-Takt: 2,5 Einspritzungen pro Umdrehung
-// Dieseldichte ca. 0,832 kg/L
+// VERBRAUCHSWERTE LESEN
+// L/h direkt vom MSG (MWB 15 Feld 3)
+// Geschwindigkeit aus MWB 6 Feld 1, korrigiert um die
+// eingestellte Abweichung
 // =====================================================
 
-float calculateLitersPerHour(uint16_t rpm, float injection) {
-  const float INJECTIONS_PER_REV = 2.5f;
-  const float DIESEL_DENSITY_MG_PER_L = 832000.0f;
+bool readFuelValues(float &litersPerHour, float &speedKmh) {
+  KwpValue g15[KWP_MAX_FIELDS];
+  uint8_t n = 0;
+  KwpValue speedValue;
 
-  float mgPerMinute =
-    injection * (float)rpm * INJECTIONS_PER_REV;
+  if (!readMeasurementGroup(15, g15, n, false) ||
+      n < 3 || g15[2].isText) {
+    return false;
+  }
 
-  return (mgPerMinute / DIESEL_DENSITY_MG_PER_L) * 60.0f;
+  if (!readMeasurement(6, 1, speedValue, false)) {
+    return false;
+  }
+
+  litersPerHour = (float)g15[2].value;
+  speedKmh = (float)speedValue.value *
+             (1.0f + speedCorrectionPercent / 100.0f);
+
+  return true;
 }
 
-void calculateFuelConsumption() {
+// Aktuellen Verbrauch und Fahrt-Durchschnitt aktualisieren
+bool readAndCalculateConsumption() {
+  float litersPerHour = 0.0f;
+  float speedKmh = 0.0f;
 
-  float litersPerHour =
-    calculateLitersPerHour(lastRpm, injectionActual);
+  if (!readFuelValues(litersPerHour, speedKmh)) {
+    return false;
+  }
+
+  currentSpeed = speedKmh;
+  calculateFuelConsumption(litersPerHour);
+  updateAverageFuelConsumption(litersPerHour, currentSpeed);
+  lastAverageMeasurementTime = millis();
+
+  return true;
+}
+
+void calculateFuelConsumption(float litersPerHour) {
 
   // -------------------------------------------------
   // BEI FAHRZEUGSTILLSTAND ZURUECKSETZEN
@@ -2169,33 +2373,19 @@ void updateAverageFuelConsumption(float litersPerHour, float speedKmh) {
 }
 
 // =====================================================
-// MWB 1 + MWB 6 FÜR DEN DURCHSCHNITT LESEN
+// MWB 15 + MWB 6 FÜR DEN DURCHSCHNITT LESEN
 // (wird in Modi ohne Verbrauchsanzeige alle 2 s genutzt)
 // =====================================================
 
 bool readTripAverageValues() {
-  KwpValue g1[KWP_MAX_FIELDS];
-  uint8_t n = 0;
-  KwpValue speedValue;
+  float litersPerHour = 0.0f;
+  float speedKmh = 0.0f;
 
-  if (!readMeasurementGroup(1, g1, n, false) || n < 2) {
+  if (!readFuelValues(litersPerHour, speedKmh)) {
     return false;
   }
 
-  uint16_t rpm = (uint16_t)g1[0].value;
-  float injection = (float)g1[1].value;
-
-  if (!readMeasurement(6, 1, speedValue, false)) {
-    return false;
-  }
-
-  // Frische Werte gleich mit übernehmen
-  lastRpm = rpm;
-  injectionActual = injection;
-
-  updateAverageFuelConsumption(
-    calculateLitersPerHour(rpm, injection),
-    (float)speedValue.value);
+  updateAverageFuelConsumption(litersPerHour, speedKmh);
 
   return true;
 }
@@ -2219,7 +2409,20 @@ void oledShowValue(String value, String unit) {
   display.display();
 }
 
+// Anderes Steuergerät in der WebApp aktiv
+void oledShowForeign() {
+  char text[8];
+  snprintf(text, sizeof(text), "SG %02X", webEcuAddress);
+  bool connected = kwpConnected && kwpAddress == webEcuAddress;
+  oledShowValue(String(text), connected ? "Diagnose" : "gewaehlt");
+}
+
 void oledShowNormal() {
+  if (foreignEcuActive()) {
+    oledShowForeign();
+    return;
+  }
+
   if (displayMode == MODE_BOOST) {
     oledShowValue(String(lastBoostMbar), baseUnits[SCR_BOOST]);
   } else if (displayMode == MODE_CONSUMPTION) {
@@ -2453,6 +2656,11 @@ void updateVoltageDisplay() {
 
   lastVoltageDisplay = millis();
 
+  if (foreignEcuActive()) {
+    oledShowForeign();
+    return;
+  }
+
   // Diagnose aus -> Hinweis statt Spannung (Spannung fürs Web weiter messen)
   if (diagDisabled) {
     measureVoltage();
@@ -2538,6 +2746,8 @@ bool screenValid(int id) {
   // Drehzahl und Einspritzmenge entfallen (über eigene Messwerte möglich)
   if (id == SCR_RPM || id == SCR_INJECTION) return false;
 
+  if (id == SCR_CODEBLOCK) return true;
+
   if (id >= SCR_VOLTAGE && id <= SCR_INJECTION) return true;
 
   if (id >= SCR_CUSTOM1 && id < SCR_CUSTOM1 + MAX_CUSTOM) {
@@ -2567,6 +2777,9 @@ void loadOledConfig() {
     prefs.getBytes("units", baseUnits, sizeof(baseUnits));
   }
 
+  // Ältere Listen kennen den Codeblock noch nicht als Bildschirm
+  bool needsCodeblock = !prefs.isKey("cb");
+
   prefs.end();
 
   // Ungültige Einträge entfernen
@@ -2583,6 +2796,14 @@ void loadOledConfig() {
     screenCount = 1;
   }
 
+  // Einmalig: bisher folgte der Codeblock immer am Ende der Liste
+  if (needsCodeblock) {
+    if (!screenInList(SCR_CODEBLOCK) && screenCount < MAX_SCREENS) {
+      screenList[screenCount++] = SCR_CODEBLOCK;
+    }
+    saveOledConfig();
+  }
+
   Serial.print("OLED-Konfiguration geladen, Bildschirme: ");
   Serial.println(screenCount);
 }
@@ -2592,6 +2813,7 @@ void saveOledConfig() {
   prefs.putBytes("list", screenList, screenCount);
   prefs.putBytes("custom", customScreens, sizeof(customScreens));
   prefs.putBytes("units", baseUnits, sizeof(baseUnits));
+  prefs.putBool("cb", true);
   prefs.end();
 
   Serial.println("OLED-Konfiguration gespeichert.");
@@ -2685,6 +2907,10 @@ void applyScreen(uint8_t id) {
   lastVoltageDisplay = 0;
 
   switch (id) {
+    case SCR_CODEBLOCK:
+      enterCodeblockMode();
+      return;
+
     case SCR_VOLTAGE:
       displayMode = MODE_VOLTAGE;
       Serial.println("MODE: SPANNUNG");
@@ -2712,8 +2938,6 @@ void applyScreen(uint8_t id) {
 
 // Nach Änderung: aktuellen Bildschirm in neuer Liste wiederfinden
 void syncScreenIndex() {
-  if (displayMode == MODE_CODEBLOCK) return;
-
   for (uint8_t i = 0; i < screenCount; i++) {
     if (screenList[i] == currentScreenId &&
         screenValid(currentScreenId)) {
@@ -2744,7 +2968,7 @@ void enterCodeblockMode() {
   // Verbindung herstellen
   // -------------------------------------------------
 
-  if (!kwpConnected) {
+  if (!kwpConnected || kwpAddress != MSG_ADDRESS) {
     if (lastConnectAttempt != 0 &&
         millis() - lastConnectAttempt < RECONNECT_PAUSE_MS) {
       oledShowValue("CB ?", "kein MSG");
@@ -3012,12 +3236,8 @@ void buttonTask(void *param) {
 // TASTER AUSWERTEN
 //
 // KURZ:
-//   Spannung       -> Drehzahl
-//   Drehzahl       -> Ladedruck
-//   Ladedruck      -> Verbrauch
-//   Verbrauch      -> Einspritzmenge
-//   Einspritzmenge -> Codeblock
-//   Codeblock      -> Spannung
+//   Nächster Bildschirm laut OLED-Liste (Codeblock ist
+//   ein normaler Eintrag und kann ausgeblendet werden)
 //
 // LANG:
 //   Im Codeblock-Modus:
@@ -3101,25 +3321,14 @@ void handleButton() {
     // ===================================================
     Serial.println("KURZER DRUCK");
 
-    // Codeblock -> zurück zum ersten Bildschirm
-    if (displayMode == MODE_CODEBLOCK) {
-      if (kwpConnected) {
-        disconnectMSG();
-      }
-      screenIndex = 0;
-      applyScreen(screenList[0]);
-      continue;
+    // Codeblock verlassen -> offene Verbindung beenden
+    if (displayMode == MODE_CODEBLOCK && kwpConnected) {
+      disconnectMSG();
     }
 
     // Nächster Bildschirm aus der Liste
-    screenIndex++;
-
-    if (screenIndex >= screenCount) {
-      Serial.println("MODE: CODEBLOCK");
-      enterCodeblockMode();
-    } else {
-      applyScreen(screenList[screenIndex]);
-    }
+    screenIndex = (screenIndex + 1) % screenCount;
+    applyScreen(screenList[screenIndex]);
   }
 }
 
@@ -3159,11 +3368,24 @@ void updateMeasurements() {
     updateVoltageDisplay();
   }
 
+  // Anderes Steuergerät in der WebApp gewählt?
+  bool foreign = foreignEcuActive();
+
+  // Zurück zum Motor -> OLED neu zeichnen
+  static bool wasForeign = false;
+  if (wasForeign && !foreign) {
+    lastVoltageDisplay = 0;
+    if (displayMode == MODE_CODEBLOCK) {
+      oledShowCodeblock();
+    }
+  }
+  wasForeign = foreign;
+
   // =====================================================
-  // CODEBLOCK -> nie für Web lesen
+  // CODEBLOCK -> nie für Web lesen (außer anderes SG)
   // =====================================================
 
-  if (displayMode == MODE_CODEBLOCK) {
+  if (displayMode == MODE_CODEBLOCK && !foreign) {
     return;
   }
 
@@ -3187,7 +3409,9 @@ void updateMeasurements() {
   }
 
   // Verbindung herstellen (1 Versuch, danach 15 s Pause)
-  if (!kwpConnected) {
+  uint8_t target = foreign ? webEcuAddress : MSG_ADDRESS;
+
+  if (!kwpConnected || kwpAddress != target) {
     if (lastConnectAttempt != 0 &&
         millis() - lastConnectAttempt < RECONNECT_PAUSE_MS) {
       return;
@@ -3195,7 +3419,8 @@ void updateMeasurements() {
 
     lastConnectAttempt = millis();
 
-    if (!connectMSG(1)) {
+    if (!connectECU(target, 1)) {
+      oledShowNormal();
       return;
     }
 
@@ -3208,9 +3433,7 @@ void updateMeasurements() {
 
 #if TESTBENCH_MODE
 
-  lastRpm = 900;
   lastBoostMbar = 1000;
-  injectionActual = 42.5;
 
   bool readOk = true;
 
@@ -3226,13 +3449,34 @@ void updateMeasurements() {
   // MWB 001 Feld 1+2, MWB 010 Feld 2
   // ================================================
 
-  if (webActive && mwbActive()) {
+  if (foreign) {
+    // Anderes Steuergerät: nur den gewählten Block lesen,
+    // keine Motorwerte
+    readOk = true;
+
+    if (mwbActive()) {
+      uint8_t n = 0;
+      readOk = readMeasurementGroup(webMwbGroup, mwbData, n, false);
+      if (readOk) {
+        mwbCount = n;
+        mwbDataGroup = webMwbGroup;
+        mwbDataAddress = kwpAddress;
+        mwbError = false;
+      } else {
+        mwbCount = 0;
+        mwbError = true;
+      }
+    }
+  }
+
+  else if (webActive && mwbActive()) {
     // MWB-Seite offen: nur den gewählten Block lesen
     uint8_t n = 0;
     readOk = readMeasurementGroup(webMwbGroup, mwbData, n, false);
     if (readOk) {
       mwbCount = n;
       mwbDataGroup = webMwbGroup;
+      mwbDataAddress = kwpAddress;
       mwbError = false;
 
       // OLED zeigt eigenen Messwert
@@ -3256,47 +3500,31 @@ void updateMeasurements() {
 
   else if (webActive) {
     // Dashboard offen -> alle Werte der OLED-Liste lesen
-    KwpValue g1[KWP_MAX_FIELDS];
-    uint8_t n = 0;
+    readOk = true;
 
-    if (readMeasurementGroup(1, g1, n, false) && n >= 2) {
-      lastRpm = (uint16_t)g1[0].value;
-      injectionActual = (float)g1[1].value;
-      readOk = true;
+    // Ueberdruck = MWB 010 Feld 3 - Feld 2
+    if (screenInList(SCR_BOOST) || displayMode == MODE_BOOST) {
+      readOk = readBoostOverpressure();
+    }
 
-      // Ueberdruck = MWB 010 Feld 3 - Feld 2
-      if (screenInList(SCR_BOOST) || displayMode == MODE_BOOST) {
-        readOk = readBoostOverpressure();
+    // OLED zeigt eigenen Messwert -> zusätzlich lesen
+    if (readOk && displayMode == MODE_CUSTOM) {
+      CustomScreen &c = customScreens[activeCustom];
+      readOk = readMeasurement(c.group, c.field, v, false);
+      if (readOk) {
+        setCustomValue(v.isText, v.text, v.value, v.unit);
       }
-	  
-      // OLED zeigt eigenen Messwert -> zusätzlich lesen
-      if (readOk && displayMode == MODE_CUSTOM) {
-        CustomScreen &c = customScreens[activeCustom];
-        readOk = readMeasurement(c.group, c.field, v, false);
-        if (readOk) {
-          setCustomValue(v.isText, v.text, v.value, v.unit);
-        }
-      }
+    }
 
-      // Weitere eigene Messwerte fürs Dashboard (einer pro Zyklus)
-      if (readOk && !readNextWebCustom() && kwpLinkError) {
-        readOk = false;
-      }
+    // Weitere eigene Messwerte fürs Dashboard (einer pro Zyklus)
+    if (readOk && !readNextWebCustom() && kwpLinkError) {
+      readOk = false;
+    }
 
-      // Verbrauch im Dashboard oder am OLED -> zusätzlich Geschwindigkeit
-      if (readOk &&
-          (screenInList(SCR_CONSUMPTION) || displayMode == MODE_CONSUMPTION)) {
-        readOk = readMeasurement(6, 1, v, false);
-        if (readOk) {
-          currentSpeed = (float)v.value;
-          calculateFuelConsumption();
-
-          updateAverageFuelConsumption(
-            calculateLitersPerHour(lastRpm, injectionActual),
-            currentSpeed);
-          lastAverageMeasurementTime = millis();
-        }
-      }
+    // Verbrauch im Dashboard oder am OLED
+    if (readOk &&
+        (screenInList(SCR_CONSUMPTION) || displayMode == MODE_CONSUMPTION)) {
+      readOk = readAndCalculateConsumption();
     }
   }
 
@@ -3311,29 +3539,11 @@ void updateMeasurements() {
   }
 
   // ================================================
-  // VERBRAUCH -> MWB 001 Feld 1+2, MWB 006 Feld 1
+  // VERBRAUCH -> MWB 015 Feld 3, MWB 006 Feld 1
   // ================================================
 
   else if (displayMode == MODE_CONSUMPTION) {
-    KwpValue g1[KWP_MAX_FIELDS];
-    uint8_t n = 0;
-
-    if (readMeasurementGroup(1, g1, n, false) && n >= 2) {
-      lastRpm = (uint16_t)g1[0].value;
-      injectionActual = (float)g1[1].value;
-
-      if (readMeasurement(6, 1, v, false)) {
-        currentSpeed = (float)v.value;
-        calculateFuelConsumption();
-
-        updateAverageFuelConsumption(
-          calculateLitersPerHour(lastRpm, injectionActual),
-          currentSpeed);
-        lastAverageMeasurementTime = millis();
-
-        readOk = true;
-      }
-    }
+    readOk = readAndCalculateConsumption();
   }
 
   // ================================================
@@ -3376,6 +3586,7 @@ void updateMeasurements() {
   // ================================================
 
   if (readOk &&
+      !foreign &&
       !mwbActive() &&
 	  !buttonPending() &&
       millis() - lastAverageMeasurementTime >=
@@ -3522,8 +3733,11 @@ void processFaultRequest() {
   bool result = false;
   kwpLinkError = false;
 
-  // connectMSG() gibt sofort true zurück, wenn bereits verbunden
-  if (connectMSG(startupFaultCheck ? 1 : MAX_CONNECT_ATTEMPTS)) {
+  // connectECU() gibt sofort true zurück, wenn bereits verbunden
+  uint8_t address = startupFaultCheck ? MSG_ADDRESS : pendingFaultAddress;
+  faultDataAddress = address;
+
+  if (connectECU(address, startupFaultCheck ? 1 : MAX_CONNECT_ATTEMPTS)) {
     result = (request == FAULT_REQUEST_READ)
                ? readFaultMemory()
                : clearFaultMemory();
@@ -3604,6 +3818,10 @@ void handleApiCodeblock() {
     server.send(409, JSON_TYPE, "{\"ok\":false,\"msg\":\"Diagnose ist aus\"}");
     return;
   }
+  if (!screenInList(SCR_CODEBLOCK)) {
+    server.send(409, JSON_TYPE, "{\"ok\":false,\"msg\":\"Codeblock ist ausgeblendet\"}");
+    return;
+  }
   if (pendingCodeblockTarget != 0 || pendingFaultRequest != FAULT_REQUEST_NONE) {
     server.send(409, JSON_TYPE, "{\"ok\":false,\"msg\":\"Gerät ist beschäftigt\"}");
     return;
@@ -3646,7 +3864,7 @@ void handleApiLive() {
 
   String json = "{";
   json += "\"connected\":";
-  json += kwpConnected ? "true" : "false";
+  json += (kwpConnected && kwpAddress == MSG_ADDRESS) ? "true" : "false";
   json += ",\"diag\":";
   json += diagDisabled ? "false" : "true";
   json += ",\"cb\":";
@@ -3676,6 +3894,10 @@ void handleApiLive() {
                : "MWB " + String(c.group) + " Feld " + String(c.field);
       unit = strlen(c.unit) > 0 ? String(c.unit) : customLiveUnit[slot];
       value = customLive[slot].length() > 0 ? customLive[slot] : "-";
+    } else if (id == SCR_CODEBLOCK) {
+      // Eigene Karte in der WebApp, Wert kommt aus "coding"
+      name = "Codeblock";
+      fromMsg = false;
     } else if (id <= SCR_INJECTION) {
       name = BASE_NAMES[id];
       unit = baseUnits[id];
@@ -3691,8 +3913,7 @@ void handleApiLive() {
           value = String(averageFuelConsumption, 1);
           fromMsg = false;   // bleibt nach Verbindungsabbruch gültig
           break;
-        case SCR_RPM:         value = String(lastRpm);                    break;
-        default:              value = String(injectionActual, 1);         break;
+        default:              value = "-";                                break;
       }
     } else {
       continue;
@@ -3722,7 +3943,7 @@ void handleApiLive() {
 // =====================================================
 
 // Gültigkeit prüfen, bei Fehler Meldung für die WebApp
-String checkSettings(uint32_t lp, uint32_t dp, float vo) {
+String checkSettings(uint32_t lp, uint32_t dp, float vo, float sp) {
   if (lp < 1000 || lp > 10000) {
     return "Langer Druck: 1,0 bis 10,0 s";
   }
@@ -3735,6 +3956,9 @@ String checkSettings(uint32_t lp, uint32_t dp, float vo) {
   if (isnan(vo) || vo < -3.0f || vo > 3.0f) {
     return "Spannungskorrektur: -3,00 bis +3,00 V";
   }
+  if (isnan(sp) || sp < -15.0f || sp > 15.0f) {
+    return "Geschwindigkeitsabweichung: -15,0 bis +15,0 %";
+  }
   return "";
 }
 
@@ -3743,18 +3967,21 @@ void loadSettings() {
   uint32_t lp = prefs.getUInt("lp", DEFAULT_LONG_PRESS_MS);
   uint32_t dp = prefs.getUInt("dp", DEFAULT_DIAG_PRESS_MS);
   float vo = prefs.getFloat("vo", DEFAULT_VOLTAGE_OFFSET);
+  float sp = prefs.getFloat("sp", DEFAULT_SPEED_CORRECTION_PCT);
   prefs.end();
 
   // Kaputte Werte im Flash -> Standard verwenden
-  if (checkSettings(lp, dp, vo).length() > 0) {
+  if (checkSettings(lp, dp, vo, sp).length() > 0) {
     lp = DEFAULT_LONG_PRESS_MS;
     dp = DEFAULT_DIAG_PRESS_MS;
     vo = DEFAULT_VOLTAGE_OFFSET;
+    sp = DEFAULT_SPEED_CORRECTION_PCT;
   }
 
   buttonLongPressMs = lp;
   buttonDiagPressMs = dp;
   voltageOffset = vo;
+  speedCorrectionPercent = sp;
 
   Serial.print("Einstellungen: lang ");
   Serial.print(lp);
@@ -3762,7 +3989,9 @@ void loadSettings() {
   Serial.print(dp);
   Serial.print(" ms, Offset ");
   Serial.print(vo, 2);
-  Serial.println(" V");
+  Serial.print(" V, Geschwindigkeit ");
+  Serial.print(sp, 1);
+  Serial.println(" %");
 }
 
 void handleSettingsPage() {
@@ -3779,14 +4008,30 @@ void handleApiSettings() {
   json += String(buttonDiagPressMs);
   json += ",\"vo\":";
   json += String(voltageOffset, 2);
+  json += ",\"sp\":";
+  json += String(speedCorrectionPercent, 1);
   json += ",\"volt\":";
   json += String(measuredVoltage, 2);
+  json += ",\"bauds\":{";
+  bool firstBaud = true;
+  for (uint8_t a = 1; a < 128; a++) {
+    if (ecuBaudCache[a] == 0) continue;
+    if (!firstBaud) json += ",";
+    firstBaud = false;
+    json += "\"";
+    json += hexByte(a);
+    json += "\":";
+    json += String(ecuBaudCache[a]);
+  }
+  json += "}";
   json += ",\"def\":{\"lp\":";
   json += String(DEFAULT_LONG_PRESS_MS);
   json += ",\"dp\":";
   json += String(DEFAULT_DIAG_PRESS_MS);
   json += ",\"vo\":";
   json += String(DEFAULT_VOLTAGE_OFFSET, 2);
+  json += ",\"sp\":";
+  json += String(DEFAULT_SPEED_CORRECTION_PCT, 1);
   json += "}}";
 
   server.sendHeader("Cache-Control", "no-store");
@@ -3799,8 +4044,9 @@ void handleApiSettingsSave() {
   uint32_t lp = (uint32_t)server.arg("lp").toInt();
   uint32_t dp = (uint32_t)server.arg("dp").toInt();
   float vo = server.arg("vo").toFloat();
+  float sp = server.arg("sp").toFloat();
 
-  String err = checkSettings(lp, dp, vo);
+  String err = checkSettings(lp, dp, vo, sp);
   if (err.length() > 0) {
     server.send(400, "application/json; charset=utf-8",
                 "{\"ok\":false,\"msg\":\"" + jsonEscape(err) + "\"}");
@@ -3810,11 +4056,13 @@ void handleApiSettingsSave() {
   buttonLongPressMs = lp;
   buttonDiagPressMs = dp;
   voltageOffset = vo;
+  speedCorrectionPercent = sp;
 
   prefs.begin("cfg", false);
   prefs.putUInt("lp", lp);
   prefs.putUInt("dp", dp);
   prefs.putFloat("vo", vo);
+  prefs.putFloat("sp", sp);
   prefs.end();
 
   // Spannung sofort mit neuem Offset messen und anzeigen
@@ -3832,9 +4080,35 @@ void handleMwbPage() {
   server.send(200, "text/html; charset=utf-8", MWB_HTML);
 }
 
+// Steuergerät aus ?addr=15 (Hex wie in VCDS), sonst Motor
+uint8_t parseEcuArg() {
+  if (!server.hasArg("addr")) return MSG_ADDRESS;
+  long a = strtol(server.arg("addr").c_str(), nullptr, 16);
+  return (a >= 0x01 && a <= 0x7F) ? (uint8_t)a : MSG_ADDRESS;
+}
+
+// WebApp hat ein Steuergerät gewählt bzw. die Seite ist noch offen
+void touchWebEcu(uint8_t address) {
+  if (address != webEcuAddress) {
+    webEcuAddress = address;
+    lastConnectAttempt = 0;   // sofort verbinden
+    mwbCount = 0;
+    mwbDataGroup = 0;
+    mwbError = false;
+  }
+  lastEcuRequest = millis();
+}
+
+String hexByte(uint8_t value) {
+  char text[3];
+  snprintf(text, sizeof(text), "%02X", value);
+  return String(text);
+}
+
 void handleApiMwb() {
   lastWebRequest = millis();
   lastMwbRequest = millis();
+  touchWebEcu(parseEcuArg());
 
   if (server.hasArg("group")) {
     int g = server.arg("group").toInt();
@@ -3846,11 +4120,19 @@ void handleApiMwb() {
     }
   }
 
-  int idx = findMwbIndex(webMwbGroup);
+  // Feldnamen sind nur für das Motorsteuergerät hinterlegt
+  int idx = webEcuAddress == MSG_ADDRESS ? findMwbIndex(webMwbGroup) : -1;
+  bool connected = kwpConnected && kwpAddress == webEcuAddress;
 
   String json = "{\"connected\":";
-  json += kwpConnected ? "true" : "false";
-  json += ",\"group\":";
+  json += connected ? "true" : "false";
+  json += ",\"addr\":\"";
+  json += hexByte(webEcuAddress);
+  json += "\",\"dataAddr\":\"";
+  json += hexByte(mwbDataAddress);
+  json += "\",\"ident\":\"";
+  json += connected ? jsonEscape(ecuIdentText) : String("");
+  json += "\",\"group\":";
   json += String(webMwbGroup);
   json += ",\"dataGroup\":";
   json += String(mwbDataGroup);
@@ -3925,6 +4207,7 @@ void handleApiFaultRead() {
     return;
   }
 
+  pendingFaultAddress = parseEcuArg();
   pendingFaultRequest = FAULT_REQUEST_READ;
   faultStatusText = "Fehlerspeicher wird gelesen...";
   server.send(202, "application/json", "{\"accepted\":true}");
@@ -3939,6 +4222,7 @@ void handleApiFaultClear() {
     return;
   }
 
+  pendingFaultAddress = parseEcuArg();
   pendingFaultRequest = FAULT_REQUEST_CLEAR;
   faultStatusText = "Fehlerspeicher wird gelöscht...";
   server.send(202, "application/json", "{\"accepted\":true}");
@@ -3947,12 +4231,20 @@ void handleApiFaultClear() {
 void handleApiFaults() {
   lastWebRequest = millis();
   lastFaultPageRequest = millis();
+  touchWebEcu(parseEcuArg());
 
   bool busy = faultRequestRunning ||
               pendingFaultRequest != FAULT_REQUEST_NONE;
+  bool connected = kwpConnected && kwpAddress == faultDataAddress;
 
   String json = "{\"running\":";
   json += busy ? "true" : "false";
+  json += ",\"fw\":\"" FW_VERSION "\"";
+  json += ",\"addr\":\"";
+  json += hexByte(faultDataAddress);
+  json += "\",\"ident\":\"";
+  json += connected ? jsonEscape(ecuIdentText) : String("");
+  json += "\"";
   json += ",\"valid\":";
   json += faultMemoryValid ? "true" : "false";
   json += ",\"error\":";
@@ -4307,10 +4599,19 @@ void setup() {
   Serial.setTxTimeoutMs(0);
 #endif
 
+  Serial.println();
+  Serial.println("CodeBlockSwitchT4 Version " FW_VERSION);
+
   // Gespeicherte OLED-Konfiguration und Einstellungen laden
   // (vor dem Taster-Task, der die Tastendauer nutzt)
   loadOledConfig();
   loadSettings();
+
+  // Gefundene Baudraten laden; Motor ist immer bekannt
+  loadBaudCache();
+  if (ecuBaudCache[MSG_ADDRESS] == 0) {
+    ecuBaudCache[MSG_ADDRESS] = KLINE_BAUD;
+  }
 
   // ------------------------------------------
   // K-LINE
